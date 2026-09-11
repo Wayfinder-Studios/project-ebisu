@@ -1,0 +1,22 @@
+name: "Task / Feature"
+description: "Implement a feature from the SRS"
+labels: ["enhancement"]
+body:
+  - type: input
+    id: srs-reference
+    attributes:
+      label: SRS Section Reference
+      description: "e.g., Section 3.2.1 Auth"
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      value: "- [ ] \n- [ ] "
+    validations:
+      required: true

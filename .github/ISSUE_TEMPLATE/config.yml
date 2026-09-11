@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Engineering Documentation & SRS"
+    url: "https://github.com/Wayfinder-Labs/project-ebisu/tree/main/docs"
+    about: "Read the Software Requirements Specification (SRS) and architecture blueprints before creating tasks."
