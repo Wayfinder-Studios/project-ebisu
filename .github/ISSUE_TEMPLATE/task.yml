@@ -2,21 +2,48 @@ name: "Task / Feature"
 description: "Implement a feature from the SRS"
 labels: ["enhancement"]
 body:
+  - type: dropdown
+    id: epic
+    attributes:
+      label: Epic / Feature Area
+      description: "Select the high-level feature module from the architecture."
+      options:
+        - "Authentication & Identity"
+        - "Campaign Management"
+        - "Buyer Checkout & Reservation"
+        - "Payment Verification Desk"
+        - "MOQ Safeguards & Refunds"
+        - "Toll-Gate & Production Handoff"
+        - "Booth Dispatch Terminal"
+        - "Daily Cash Register"
+        - "Superadmin Governance"
+        - "Database & Infrastructure"
+    validations:
+      required: true
   - type: input
     id: srs-reference
     attributes:
       label: SRS Section Reference
-      description: "e.g., Section 3.2.1 Auth"
+      description: "e.g., Section 3.2 UC-03 or docs/project-spec.md Section 1.4"
+      placeholder: "e.g., Section 3.2 UC-03"
+  - type: input
+    id: estimate
+    attributes:
+      label: Estimate
+      description: "Estimated development effort in hours or story points (e.g., 3h, 5sp)."
+      placeholder: "e.g., 3h or 5sp"
   - type: textarea
     id: description
     attributes:
       label: Description
+      description: "Detailed description of the task, implementation scope, and dependencies."
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance Criteria
+      description: "Checklist of verifiable requirements for this task to be considered complete."
       value: "- [ ] \n- [ ] "
     validations:
       required: true
