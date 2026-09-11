@@ -21,17 +21,12 @@ All engineering specifications, database schemas, and meeting records live direc
 
 ```
 docs/
-├── srs/
-│   ├── 01-introduction.md          # Purpose, scope, user classes, operational constraints
-│   ├── 02-system-architecture.md   # Functional use cases (UC-01 - UC-20), modules, governance
-│   └── 03-api-endpoints.md         # Interfaces, data requirements, decisions log
-├── schemas/
-│   └── supabase-schema.md          # PostgreSQL / Supabase schema, RLS policies & tables
-├── design-spec/
-│   └── design-spec.md              # UI/UX design specifications & component guidelines
+├── project-spec.md         # Complete Software Requirements Specification (SRS)
+├── database-schema.md      # PostgreSQL / Supabase schema, RLS policies & tables
+├── design-spec.md          # UI/UX design specifications & component guidelines
 └── moms/
-    ├── template.md                 # Standard Minutes of Meeting markdown template
-    └── 2026-09-10-kickoff.md       # Project kickoff meeting notes
+    ├── template.md         # Standard Minutes of Meeting markdown template
+    └── 2026-09-10-kickoff.md # Project kickoff meeting notes
 ```
 
 ---
