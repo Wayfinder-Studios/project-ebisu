@@ -39,7 +39,7 @@ docs/
 - **Frontend / Framework:** Next.js (App Router), TypeScript, TailwindCSS / Vanilla CSS
 - **Backend & Database:** Supabase (PostgreSQL with Row Level Security, Triggers & Atomic Functions)
 - **Object Storage:** Cloudflare R2 / AWS S3 (Receipt screenshots, product mockups)
-- **Transactional Notifications:** Resend (Email magic links & status updates)
+- **Transactional Notifications:** Google SMTP (Email magic links & status updates)
 
 ---
 

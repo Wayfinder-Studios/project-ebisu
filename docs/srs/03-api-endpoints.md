@@ -15,7 +15,7 @@ Zero dedicated hardware interfaces. The system operates on commodity smartphones
 
 ### 5.3 Software Interfaces
 * **Object Storage:** Cloud object store (Cloudflare R2 / AWS S3) for persistent receipt screenshots, product mockups, and refund receipts.
-* **Transactional Email:** Transactional email API (Resend) to deliver passwordless magic links and status notifications.
+* **Transactional Email:** Google SMTP to deliver passwordless magic links and status notifications.
 * **Database & Persistence:** Supabase (PostgreSQL) with atomic transactional updates, row-level security (RLS), strict uniqueness constraints, and append-only audit tables.
 
 ### 5.4 Communications Interfaces
