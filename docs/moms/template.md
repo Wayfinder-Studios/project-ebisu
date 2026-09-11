@@ -7,7 +7,7 @@
 
 ---
 
-## 👥 Attendees
+## Attendees
 
 - [x] @username (Role)
 - [x] @username (Role)
@@ -15,7 +15,7 @@
 
 ---
 
-## 🎯 Objectives / Agenda
+## Objectives / Agenda
 
 1. Item 1
 2. Item 2
@@ -23,7 +23,7 @@
 
 ---
 
-## 💬 Discussion Notes
+## Discussion Notes
 
 ### 1. Topic 1
 - Key discussion point
@@ -34,7 +34,7 @@
 
 ---
 
-## ⚖️ Decisions Made
+## Decisions Made
 
 | Decision # | Summary | Rationale |
 |---|---|---|
@@ -42,7 +42,7 @@
 
 ---
 
-## ✅ Action Items & Issue Links
+## Action Items & Issue Links
 
 > When an action item arises, create a GitHub Issue using the Task template and link it here:
 

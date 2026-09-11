@@ -1,10 +1,10 @@
-# Project Ebisu 🌸
+# Project Ebisu
 
 > **Campus Merch Platform** — Multi-tenant e-commerce and operational logistics platform tailored for university student organizations, batch pre-orders, flash drops, and fast booth distribution.
 
 ---
 
-## 📌 Overview
+## Overview
 
 Project Ebisu addresses the specific operational frictions faced by university councils, student organizations, and campus merchants when running merchandise campaigns:
 - **Zero Platform Escrow:** Direct-to-merchant payments (GCash, Maya, Bank Transfer, Walk-in Cash) with proof verification desk.
@@ -15,7 +15,7 @@ Project Ebisu addresses the specific operational frictions faced by university c
 
 ---
 
-## 🗂️ Documentation Architecture
+## Documentation Architecture
 
 All engineering specifications, database schemas, and meeting records live directly in this repository as the **single source of truth**:
 
@@ -34,7 +34,7 @@ docs/
 
 ---
 
-## 🛠️ Tech Stack & Infrastructure
+## Tech Stack & Infrastructure
 
 - **Frontend / Framework:** Next.js (App Router), TypeScript, TailwindCSS / Vanilla CSS
 - **Backend & Database:** Supabase (PostgreSQL with Row Level Security, Triggers & Atomic Functions)
@@ -43,7 +43,7 @@ docs/
 
 ---
 
-## 🔄 Engineering & Tracking Workflow
+## Engineering & Tracking Workflow
 
 To keep code, documentation, and task tracking strictly synchronized:
 
@@ -51,7 +51,7 @@ To keep code, documentation, and task tracking strictly synchronized:
    - Tasks and features are created via [GitHub Issue Forms](.github/ISSUE_TEMPLATE/task.yml).
    - Every issue references the relevant SRS section (e.g., `Section 3.2 UC-03`).
 2. **Project Board Tracking:**
-   - Issues route automatically to the Organization Kanban Board (`To Do` → `In Progress` → `In Review` → `Done`).
+   - Issues route automatically to the Organization Kanban Board (`To Do` -> `In Progress` -> `In Review` -> `Done`).
    - Tagged with custom fields for **Epic / Feature**, **Priority**, and **Estimate**.
 3. **Meeting Minutes (MoMs):**
    - Meeting notes are recorded in `docs/moms/YYYY-MM-DD-<topic>.md`.
@@ -68,6 +68,6 @@ To keep code, documentation, and task tracking strictly synchronized:
 
 ---
 
-## 📄 License
+## License
 
 Proprietary and confidential. See [LICENSE](LICENSE) for terms.
