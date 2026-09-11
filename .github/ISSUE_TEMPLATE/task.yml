@@ -29,9 +29,9 @@ body:
   - type: input
     id: estimate
     attributes:
-      label: Estimate
-      description: "Estimated development effort in hours or story points (e.g., 3h, 5sp)."
-      placeholder: "e.g., 3h or 5sp"
+      label: Estimate (Days)
+      description: "Estimated development effort in days (e.g., 1 day, 3 days, 0.5 days)."
+      placeholder: "e.g., 2 days"
   - type: textarea
     id: description
     attributes:
