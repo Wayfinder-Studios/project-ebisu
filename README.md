@@ -27,6 +27,8 @@ docs/
 │   └── 03-api-endpoints.md         # Interfaces, data requirements, decisions log
 ├── schemas/
 │   └── supabase-schema.md          # PostgreSQL / Supabase schema, RLS policies & tables
+├── design-spec/
+│   └── design-spec.md              # UI/UX design specifications & component guidelines
 └── moms/
     ├── template.md                 # Standard Minutes of Meeting markdown template
     └── 2026-09-10-kickoff.md       # Project kickoff meeting notes
