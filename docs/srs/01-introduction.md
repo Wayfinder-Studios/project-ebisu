@@ -20,7 +20,7 @@ The system is a multi-tenant campus commerce platform enabling accredited studen
 * **Operational Verification Desk:** Triage queues for digital payment proofs (cross-wallet/InstaPay support) and walk-in cash settlement.
 * **Audit Persistence:** Permanent transaction histories, downloadable digital receipts, and audit trails for buyers and student organizations.
 * **MOQ Evaluation:** Automated target checking at campaign deadline, 48-hour Treasurer-gated override window, and a Batch Refund Queue.
-* **Volume-Scaled Platform Toll-Gate:** ₱5.00/item fee (capped at 5% retail price) unlocking formula-sanitized Master Supplier Exports and tailor sizing matrices.
+* **Volume-Scaled Platform Toll-Gate:** 5.00 PHP/item fee (capped at 5% retail price) unlocking formula-sanitized Master Supplier Exports and tailor sizing matrices.
 * **Booth Dispatch Terminal:** Instantaneous alphanumeric pick-up code lookup (`CS-8419`) with atomic double-claim prevention.
 * **Daily Register Sessions:** Day-long booth cash tracking ledger with end-of-day dual-officer reconciliation.
 * **Superadmin & Governance Portal:** Org accreditation, fee settlement verification, and platform analytics.
@@ -47,6 +47,19 @@ The system is a multi-tenant campus commerce platform enabling accredited studen
 | **Buyer Account** | Lightweight, passwordless identity tied to email and mobile number, persisting order history and enforcing purchase caps. |
 | **Magic Link** | One-time authentication link sent via email to access orders without password management. |
 | **Reservation TTL** | Time-To-Live window during which inventory is held pending payment proof (30 mins digital) or physical cash settlement (24 hours). |
+
+---
+
+### 1.4 Engineering Team & Organizational Roles
+
+| Team Member | Roles & Responsibilities | Core Workstream Ownership |
+|---|---|---|
+| **Jamir** | Project Manager / Tech Lead / Backend | Architecture, Sprint Planning, Core Services, Database & Security |
+| **Dohn** | Backend Lead / Full-Stack | API Architecture, Supabase Schema, Concurrency & Integrations |
+| **Jaaseia** | Frontend Lead / QA | Buyer PWA UI, Design System, Component Library & Test Scenarios |
+| **Gabby** | QA Lead / Full-Stack | Test Strategy, Verification Desk, Cashier Terminals & E2E Testing |
+| **Patrick** | Full-Stack / Frontend | UI Implementation, Order Tracker & Magic Link Auth Flows |
+| **Xyryll** | Full-Stack / Backend | Production Export Toll-Gate, Register Sessions & Audit Logs |
 
 ---
 

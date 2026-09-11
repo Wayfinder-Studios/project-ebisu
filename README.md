@@ -29,7 +29,7 @@ docs/
 │   └── supabase-schema.md          # PostgreSQL / Supabase schema, RLS policies & tables
 └── moms/
     ├── template.md                 # Standard Minutes of Meeting markdown template
-    └── 2026-09-11-kickoff.md       # Project kickoff meeting notes
+    └── 2026-09-10-kickoff.md       # Project kickoff meeting notes
 ```
 
 ---
