@@ -1,7 +1,7 @@
 # Database Schema Definition (Supabase / PostgreSQL)
 ## Project Ebisu — Campus Merch Platform
 
-> **v2.10 (D-10 campaign-scoped cart + D-11 guest cart/partial-pickup, 2026-10-01):** Bundle checkout: 1 order = 1 campaign, `reserve_cart()` (digital atomic multi-line) + multi-line `create_cash_order(p_lines JSONB)`. `order_status` += `PARTIALLY_CLAIMED`; `order_items` += line claim cols (`status/quantity_claimed/claimed_at/by`). `confirm_order_pickup(code, officer, item_ids[])` supports partial. MOQ counts units. Retains v2.9 cash CHECKs, `pickup_code UNIQUE`, ordered DDL, RLS matrix.
+> **v2.11 (D-12 rejected-terminal/reorder + D-13 normalized ref/blocking Option A + D-14 /track counterpart + D-15 unit-level partial pickup, 2026-10-01):** `REJECTED` terminal (releases stock, reorder as new order; no resubmit). `payment_reference` normalized (`UPPER(TRIM())`, strip spaces/dashes) globally UNIQUE; `REJECTED` refs never freed, `CANCELLED` freed after 24h. `/track` → `/orders` list → `/orders/[id]` counterpart to per-order magic-link emails (pure magic-link, no passwords). `confirm_order_pickup(code, officer, p_claims JSONB [{item_id, qty}])` claims unit-level qty (`quantity_claimed += qty`). Retains v2.10 bundle cart, cash CHECKs, `pickup_code UNIQUE`, ordered DDL, RLS matrix.
 
 This document defines the relational database schema, custom enum types, table constraints, row-level security (RLS) policies, and atomic functions for **Project Ebisu**.
 
@@ -179,7 +179,7 @@ CREATE TABLE orders (
   total_amount NUMERIC(10, 2) NOT NULL CHECK (total_amount >= 0),
   payment_method payment_method NOT NULL,
   source_channel TEXT, -- e.g. GCash, Maya, GoTyme, BDO, Cash (cash = 'Cash', payment_reference NULL per D-06)
-  payment_reference TEXT UNIQUE, -- Global deduplication constraint (REQ-14)
+  payment_reference TEXT UNIQUE, -- Global dedup on NORMALIZED value (D-13: UPPER(TRIM()), strip spaces/dashes before check; REQ-14). REJECTED refs never freed (Option A); CANCELLED refs freed after 24h by job.
   receipt_image_url TEXT,
   rejection_reason TEXT,
   pickup_code VARCHAR(10) NOT NULL UNIQUE, -- F06 fix: globally unique, issued transactionally; stored UPPER(TRIM()); D-07: cash issued at creation
@@ -201,7 +201,7 @@ CREATE TABLE orders (
   )
 );
 
--- Order Items & Custom Personalization (v2.10: per-line partial-claim tracking, D-11)
+-- Order Items & Custom Personalization (v2.11: unit-level partial-claim tracking, D-15)
 CREATE TABLE order_items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -290,13 +290,13 @@ CREATE TABLE refunds (
 
 ## 3. Atomic Database Operations
 
-### 3.1 Booth Dispatch Confirmation — Bundle Partial Pickup (v2.10: READY lines only, per-line double-claim prevention, D-11; retains F03 + REQ-48)
+### 3.1 Booth Dispatch Confirmation — Bundle Unit-Level Partial Pickup (v2.11: READY qtys only, per-qty double-claim prevention, D-15; retains F03 + REQ-48)
 
 ```sql
 CREATE OR REPLACE FUNCTION confirm_order_pickup(
   p_pickup_code TEXT,
   p_officer_id UUID,
-  p_item_ids UUID[] DEFAULT NULL -- NULL/empty = all remaining READY lines; else selected subset (partial pickup)
+  p_claims JSONB DEFAULT NULL -- NULL/empty = all remaining qtys; else [{item_id UUID, qty INT>0}] (unit-level partial, D-15)
 )
 RETURNS TABLE (success BOOLEAN, message TEXT, order_data JSONB)
 LANGUAGE plpgsql
@@ -348,7 +348,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- v2.10: releasable order states are READY_FOR_PICKUP (first release) or PARTIALLY_CLAIMED (subsequent visits).
+  -- v2.11: releasable order states are READY_FOR_PICKUP (first release) or PARTIALLY_CLAIMED (subsequent visits).
   -- Campaign must be READY_FOR_PICKUP. Fee disputes never block release (REQ-48 preserved).
   IF v_order.status NOT IN ('READY_FOR_PICKUP', 'PARTIALLY_CLAIMED') THEN
     RETURN QUERY SELECT false, format('Order status is %s; cannot release (must be READY_FOR_PICKUP or PARTIALLY_CLAIMED).', v_order.status)::TEXT, to_jsonb(v_order);
@@ -362,35 +362,38 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Lock selected lines in stable order; claim whole quantity per line in v1 (split-qty via quantity_claimed reserved for v1.1).
-  -- Lines already CLAIMED are skipped with a per-line warning; at least one newly-claimed line is required.
+  -- Lock selected lines in stable order; claim requested qty per line (D-15 unit-level; whole-line = qty remaining).
+  -- Requested qty clamped to remaining (quantity - quantity_claimed); over-claims skipped with warning; at least one newly-claimed qty is required.
   WITH target AS (
-    SELECT oi.id
+    SELECT oi.id, LEAST((oi.quantity - oi.quantity_claimed),
+      COALESCE((c.claim->>'qty')::INT, (oi.quantity - oi.quantity_claimed))) AS claim_qty
     FROM order_items oi
+    LEFT JOIN LATERAL jsonb_array_elements(p_claims) AS c(claim) ON (c.claim->>'item_id')::UUID = oi.id
     WHERE oi.order_id = v_order.id
-      AND (p_item_ids IS NULL OR cardinality(p_item_ids) = 0 OR oi.id = ANY(p_item_ids))
+      AND (p_claims IS NULL OR jsonb_array_length(p_claims) = 0 OR (c.claim->>'item_id')::UUID = oi.id)
       AND oi.status = 'READY_FOR_PICKUP'
+      AND oi.quantity_claimed < oi.quantity
     ORDER BY oi.id
     FOR UPDATE
   ),
   claimed AS (
     UPDATE order_items oi
-    SET status = 'CLAIMED',
-        quantity_claimed = quantity,
-        claimed_at = now(),
+    SET quantity_claimed = oi.quantity_claimed + t.claim_qty,
+        status = CASE WHEN oi.quantity_claimed + t.claim_qty >= oi.quantity THEN 'CLAIMED'::order_item_status ELSE 'READY_FOR_PICKUP'::order_item_status END,
+        claimed_at = CASE WHEN oi.quantity_claimed + t.claim_qty >= oi.quantity THEN now() ELSE oi.claimed_at END,
         claimed_by_officer_id = p_officer_id
-    FROM target t WHERE oi.id = t.id
-    RETURNING oi.id
+    FROM target t WHERE oi.id = t.id AND t.claim_qty > 0
+    RETURNING oi.id, t.claim_qty
   )
-  SELECT count(*) INTO v_claimed_count FROM claimed;
+  SELECT COALESCE(sum(claim_qty), 0)::INT INTO v_claimed_count FROM claimed;
 
   IF v_claimed_count = 0 THEN
-    RETURN QUERY SELECT false, 'No releasable lines: selected lines already claimed.'::TEXT, to_jsonb(v_order);
+    RETURN QUERY SELECT false, 'No releasable qty: selected qtys already claimed or exceed remaining.'::TEXT, to_jsonb(v_order);
     RETURN;
   END IF;
 
-  -- Derive header status: CLAIMED only when zero READY lines remain.
-  SELECT count(*) INTO v_remaining FROM order_items WHERE order_id = v_order.id AND status = 'READY_FOR_PICKUP';
+  -- Derive header status: CLAIMED only when zero unclaimed qty remains.
+  SELECT count(*) INTO v_remaining FROM order_items WHERE order_id = v_order.id AND quantity_claimed < quantity;
 
   UPDATE orders
   SET
@@ -403,17 +406,17 @@ BEGIN
 
   INSERT INTO order_status_history (order_id, from_status, to_status, actor_id, notes)
   VALUES (v_order.id, v_order.status, v_result.status, p_officer_id,
-          format('Booth release: %s line(s) claimed; %s remaining', v_claimed_count, v_remaining));
+          format('Booth release: %s unit(s) claimed; %s line(s) with remaining qty', v_claimed_count, v_remaining));
 
   -- F13 fix: return the fresh post-claim row, not the stale pre-claim snapshot.
-  RETURN QUERY SELECT true, format('%s line(s) released%s.', v_claimed_count,
+  RETURN QUERY SELECT true, format('%s unit(s) released%s.', v_claimed_count,
     CASE WHEN v_remaining = 0 THEN ' — order fully CLAIMED' ELSE ' — order PARTIALLY_CLAIMED' END)::TEXT, to_jsonb(v_result);
 END;
 $$;
 
 -- REVOKE FROM PUBLIC; grant to officer roles only (apply in migration):
--- REVOKE ALL ON FUNCTION confirm_order_pickup(TEXT, UUID, UUID[]) FROM PUBLIC;
--- GRANT EXECUTE ON FUNCTION confirm_order_pickup(TEXT, UUID, UUID[]) TO authenticated;
+-- REVOKE ALL ON FUNCTION confirm_order_pickup(TEXT, UUID, JSONB) FROM PUBLIC;
+-- GRANT EXECUTE ON FUNCTION confirm_order_pickup(TEXT, UUID, JSONB) TO authenticated;
 ```
 
 ### 3.2 Officer Cash Order Creation — Multi-Line Bundle (D-10/D-11; sole cash write path, `p_lines JSONB`)
@@ -587,7 +590,7 @@ $$;
 -- GRANT EXECUTE ON FUNCTION create_cash_order(UUID, JSONB, TEXT, TEXT, TEXT, UUID, UUID) TO authenticated;
 ```
 
-### 3.3 Digital Bundle Reservation — `reserve_cart()` (D-10; buyer Purchase, single TTL per bundle)
+### 3.3 Digital Bundle Reservation — `reserve_cart()` (D-10; buyer Purchase, single TTL per bundle; D-12/D-13 v2.11 rules)
 
 ```sql
 -- Atomic buyer bundle reservation: same-campaign p_lines (1..10 lines, ≤99 units),
@@ -596,9 +599,11 @@ $$;
 -- orders(status=PAYMENT_SUBMITTED or AWAITING_PAYMENT per flow) + N order_items,
 -- single reservation_expires_at = now() + 30 mins, single pickup_code issued at verify time
 -- (UC-06) — code column filled on PAYMENT_VERIFIED to satisfy NOT NULL/UNIQUE with deferred issue.
+-- Reference normalized BEFORE global UNIQUE check (D-13: UPPER(TRIM()), strip spaces/dashes).
 -- Any line failure rolls back the whole bundle. Expiry job restores each line qty exactly once
--- conditional on prior status (quantity-aware, F11). Idempotency: client supplies
--- p_idempotency_key (UNIQUE per buyer+campaign, 24h) — retry returns existing order.
+-- conditional on prior status (quantity-aware, F11). REJECTED is terminal (D-12): releases stock
+-- immediately, no same-order resubmit; reorder creates a new order (REJECTED refs never freed, Option A).
+-- Idempotency: client supplies p_idempotency_key (UNIQUE per buyer+campaign, 24h) — retry returns existing order.
 -- SECURITY DEFINER, REVOKE FROM PUBLIC, buyer role may EXECUTE; server derives buyer from auth,
 -- never trusts caller-supplied buyer_id (F15). Full body follows the create_cash_order() locking/
 -- cap/total pattern above with payment_method IN ('DIGITAL_WALLET','BANK_TRANSFER'), RLS WITH CHECK
@@ -608,7 +613,7 @@ $$;
 
 ---
 
-## 4. Row-Level Security (DEV-02 capability matrix — v2.10 cart/bundle)
+## 4. Row-Level Security (DEV-02 capability matrix — v2.11 cart/bundle + /track portal D-14)
 
 Enable RLS on all app tables and deny direct buyer cash writes. Privileged writes go through
 `§3.1` / `§3.2` / `§3.3` (`SECURITY DEFINER`, `REVOKE FROM PUBLIC`, `GRANT EXECUTE` to `authenticated`;
@@ -634,8 +639,8 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 |---|---|---|
 | `campaigns`, `product_variants` | Public/`anon` read when `status='LIVE'` (catalog) | Org officers (same `org_id`) `INSERT/UPDATE`; structural delete blocked with active orders (REQ-07) |
 | `buyers` | Owning buyer (`auth_user_id = auth.uid()`) or same-org officer | Officer `INSERT` (find-or-create in `create_cash_order`); owner self-`UPDATE` limited columns |
-| `orders` | Owning buyer (via `buyer.auth_user_id`) or same-org officer / platform admin | Buyer `INSERT` only `payment_method != 'CASH_ON_HAND'` + `status=AWAITING_PAYMENT/PAYMENT_SUBMITTED` + single `campaign_id` per order (no cross-campaign lines; enforced in §3.3/§3.2, F07); **no direct `INSERT CASH_ON_HAND`** (REQ-13B — enforced by policy `WITH CHECK (payment_method != 'CASH_ON_HAND')` for buyer role + function-only path for officers); `total_amount` server-computed, buyers never `UPDATE total/status/verified/claimed/register/pickup_code`; header `CLAIMED` only via §3.1 when all lines claimed |
-| `order_items` | Same as parent order | Same as parent order; `unit_price` frozen from variant at insert; `variant.campaign_id` must equal `order.campaign_id` (F07); per-line claim cols writable only via §3.1 |
+| `orders` | Owning buyer (via `buyer.auth_user_id`; `/track` + per-order emails resolve to same account, D-14) or same-org officer / platform admin | Buyer `INSERT` only `payment_method != 'CASH_ON_HAND'` + `status=AWAITING_PAYMENT/PAYMENT_SUBMITTED` + single `campaign_id` per order (no cross-campaign lines; enforced in §3.3/§3.2, F07); **no direct `INSERT CASH_ON_HAND`** (REQ-13B — enforced by policy `WITH CHECK (payment_method != 'CASH_ON_HAND')` for buyer role + function-only path for officers); `total_amount` server-computed, buyers never `UPDATE total/status/verified/claimed/register/pickup_code`; header `CLAIMED` only via §3.1 when all qtys claimed; `REJECTED` terminal, no buyer-side status flip (D-12) |
+| `order_items` | Same as parent order | Same as parent order; `unit_price` frozen from variant at insert; `variant.campaign_id` must equal `order.campaign_id` (F07); per-qty claim cols (`quantity_claimed`) writable only via §3.1 (D-15) |
 | `order_status_history` | Same as parent order | `INSERT`-only via functions; no `UPDATE/DELETE` (append-only, F12) |
 | `register_sessions` | Same-org officers | Open: `CASHIER/TREASURER`; close: `closed_by` + distinct `cosigned_by` (`TREASURER`/auditor), variance note required on mismatch (constraint above, F10) |
 | `fee_settlements`, `refunds` | Same-org treasurer / platform admin | Treasurer/admin only |
@@ -661,3 +666,5 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 `ENABLE RLS` + policies + `REVOKE/GRANT` → validate on empty Supabase-compatible DB.
 
 > **D-06 audit note (2026-10-01):** No data migration for legacy buyer cash `AWAITING_PAYMENT` rows is specified — repo is docs-only with no deployed rows. If any pre-v2.9 draft rows exist, treat buyer-created `CASH_ON_HAND/AWAITING_PAYMENT` as expired/cancelled and re-enter F2F via `create_cash_order()`.
+
+> **D-12/D-13 audit note (2026-10-01, v2.11):** No `payment_attempts` table (Option A: single mutable proof slot). `REJECTED` refs stay in `orders.payment_reference` UNIQUE and are never reused; `CANCELLED`/expired refs freed after 24h by job. No migration for pre-v2.11 `REJECTED`-resubmitted rows — repo is docs-only. Buyer portal is pure magic-link (no passwords); `/track` list and per-order emails resolve via `buyers.email UNIQUE → auth_user_id`.
