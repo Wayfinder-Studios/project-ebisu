@@ -1,7 +1,7 @@
 # Database Schema Definition (Supabase / PostgreSQL)
 ## Project Ebisu — Campus Merch Platform
 
-> **v2.9 (D-06 officer-only cash, 2026-10-01):** Cash buyer-reservation path retired. `CASH_ON_HAND` retained but officer-only via RLS + `create_cash_order()`. `register_sessions` is created before `orders` (F05 fix). `pickup_code` is `UNIQUE` with transactional issuance (F06 fix). `confirm_order_pickup()` tightened to `READY_FOR_PICKUP` only (F03 fix, REQ-48 preserved).
+> **v2.10 (D-10 campaign-scoped cart + D-11 guest cart/partial-pickup, 2026-10-01):** Bundle checkout: 1 order = 1 campaign, `reserve_cart()` (digital atomic multi-line) + multi-line `create_cash_order(p_lines JSONB)`. `order_status` += `PARTIALLY_CLAIMED`; `order_items` += line claim cols (`status/quantity_claimed/claimed_at/by`). `confirm_order_pickup(code, officer, item_ids[])` supports partial. MOQ counts units. Retains v2.9 cash CHECKs, `pickup_code UNIQUE`, ordered DDL, RLS matrix.
 
 This document defines the relational database schema, custom enum types, table constraints, row-level security (RLS) policies, and atomic functions for **Project Ebisu**.
 
@@ -51,17 +51,24 @@ CREATE TYPE fee_status AS ENUM (
   'EXEMPT'
 );
 
--- Order lifecycle
+-- Order lifecycle (v2.10 adds PARTIALLY_CLAIMED for bundle partial pickup, D-11)
 CREATE TYPE order_status AS ENUM (
   'AWAITING_PAYMENT',
   'PAYMENT_SUBMITTED',
   'PAYMENT_VERIFIED',
   'IN_PRODUCTION',
   'READY_FOR_PICKUP',
+  'PARTIALLY_CLAIMED',
   'CLAIMED',
   'REJECTED',
   'CANCELLED',
   'REFUNDED'
+);
+
+-- Per-line claim state (bundle partial pickup, D-11)
+CREATE TYPE order_item_status AS ENUM (
+  'READY_FOR_PICKUP',
+  'CLAIMED'
 );
 
 -- Payment methods & channels
@@ -194,14 +201,23 @@ CREATE TABLE orders (
   )
 );
 
--- Order Items & Custom Personalization
+-- Order Items & Custom Personalization (v2.10: per-line partial-claim tracking, D-11)
 CREATE TABLE order_items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   variant_id UUID NOT NULL REFERENCES product_variants(id) ON DELETE RESTRICT,
   unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price >= 0),
   quantity INT NOT NULL DEFAULT 1 CHECK (quantity > 0),
-  customization_data JSONB NOT NULL DEFAULT '{}'::jsonb -- e.g. {"back_name": "DELA CRUZ", "back_number": "24"}
+  quantity_claimed INT NOT NULL DEFAULT 0 CHECK (quantity_claimed >= 0),
+  status order_item_status NOT NULL DEFAULT 'READY_FOR_PICKUP',
+  customization_data JSONB NOT NULL DEFAULT '{}'::jsonb, -- e.g. {"back_name": "DELA CRUZ", "back_number": "24"}
+  claimed_by_officer_id UUID REFERENCES users(id),
+  claimed_at TIMESTAMPTZ,
+  CONSTRAINT qty_claimed_lte_qty CHECK (quantity_claimed <= quantity),
+  CONSTRAINT claimed_line_consistent CHECK (
+    (status = 'CLAIMED' AND quantity_claimed = quantity AND claimed_at IS NOT NULL)
+    OR (status = 'READY_FOR_PICKUP')
+  )
 );
 
 -- Chronological Status Audit Log
@@ -274,12 +290,13 @@ CREATE TABLE refunds (
 
 ## 3. Atomic Database Operations
 
-### 3.1 Booth Dispatch Confirmation (Double-Claim Prevention — v2.9 tightened: READY_FOR_PICKUP only, F03 fix)
+### 3.1 Booth Dispatch Confirmation — Bundle Partial Pickup (v2.10: READY lines only, per-line double-claim prevention, D-11; retains F03 + REQ-48)
 
 ```sql
 CREATE OR REPLACE FUNCTION confirm_order_pickup(
   p_pickup_code TEXT,
-  p_officer_id UUID
+  p_officer_id UUID,
+  p_item_ids UUID[] DEFAULT NULL -- NULL/empty = all remaining READY lines; else selected subset (partial pickup)
 )
 RETURNS TABLE (success BOOLEAN, message TEXT, order_data JSONB)
 LANGUAGE plpgsql
@@ -289,6 +306,8 @@ AS $$
 DECLARE
   v_order orders%ROWTYPE;
   v_result orders%ROWTYPE;
+  v_claimed_count INT := 0;
+  v_remaining INT := 0;
 BEGIN
   -- Caller authorization (defense in depth; RLS §4 also applies to direct writes):
   -- p_officer_id must be an active officer. Tenant/role scoping against the order's
@@ -325,14 +344,14 @@ BEGIN
   END IF;
 
   IF v_order.status = 'CLAIMED' THEN
-    RETURN QUERY SELECT false, format('Order already claimed on %s.', v_order.claimed_at)::TEXT, to_jsonb(v_order);
+    RETURN QUERY SELECT false, format('Order already fully claimed on %s.', v_order.claimed_at)::TEXT, to_jsonb(v_order);
     RETURN;
   END IF;
 
-  -- v2.9: only READY_FOR_PICKUP may be released (premature PAYMENT_VERIFIED release closed, F03).
-  -- Campaign must also be READY_FOR_PICKUP. Fee disputes never block release (REQ-48 preserved).
-  IF v_order.status != 'READY_FOR_PICKUP' THEN
-    RETURN QUERY SELECT false, format('Order status is %s; cannot release (must be READY_FOR_PICKUP).', v_order.status)::TEXT, to_jsonb(v_order);
+  -- v2.10: releasable order states are READY_FOR_PICKUP (first release) or PARTIALLY_CLAIMED (subsequent visits).
+  -- Campaign must be READY_FOR_PICKUP. Fee disputes never block release (REQ-48 preserved).
+  IF v_order.status NOT IN ('READY_FOR_PICKUP', 'PARTIALLY_CLAIMED') THEN
+    RETURN QUERY SELECT false, format('Order status is %s; cannot release (must be READY_FOR_PICKUP or PARTIALLY_CLAIMED).', v_order.status)::TEXT, to_jsonb(v_order);
     RETURN;
   END IF;
 
@@ -343,29 +362,61 @@ BEGIN
     RETURN;
   END IF;
 
+  -- Lock selected lines in stable order; claim whole quantity per line in v1 (split-qty via quantity_claimed reserved for v1.1).
+  -- Lines already CLAIMED are skipped with a per-line warning; at least one newly-claimed line is required.
+  WITH target AS (
+    SELECT oi.id
+    FROM order_items oi
+    WHERE oi.order_id = v_order.id
+      AND (p_item_ids IS NULL OR cardinality(p_item_ids) = 0 OR oi.id = ANY(p_item_ids))
+      AND oi.status = 'READY_FOR_PICKUP'
+    ORDER BY oi.id
+    FOR UPDATE
+  ),
+  claimed AS (
+    UPDATE order_items oi
+    SET status = 'CLAIMED',
+        quantity_claimed = quantity,
+        claimed_at = now(),
+        claimed_by_officer_id = p_officer_id
+    FROM target t WHERE oi.id = t.id
+    RETURNING oi.id
+  )
+  SELECT count(*) INTO v_claimed_count FROM claimed;
+
+  IF v_claimed_count = 0 THEN
+    RETURN QUERY SELECT false, 'No releasable lines: selected lines already claimed.'::TEXT, to_jsonb(v_order);
+    RETURN;
+  END IF;
+
+  -- Derive header status: CLAIMED only when zero READY lines remain.
+  SELECT count(*) INTO v_remaining FROM order_items WHERE order_id = v_order.id AND status = 'READY_FOR_PICKUP';
+
   UPDATE orders
   SET
-    status = 'CLAIMED',
-    claimed_at = now(),
-    claimed_by_officer_id = p_officer_id,
+    status = CASE WHEN v_remaining = 0 THEN 'CLAIMED'::order_status ELSE 'PARTIALLY_CLAIMED'::order_status END,
+    claimed_at = CASE WHEN v_remaining = 0 THEN now() ELSE claimed_at END,
+    claimed_by_officer_id = CASE WHEN v_remaining = 0 THEN p_officer_id ELSE claimed_by_officer_id END,
     updated_at = now()
   WHERE id = v_order.id
   RETURNING * INTO v_result;
 
   INSERT INTO order_status_history (order_id, from_status, to_status, actor_id, notes)
-  VALUES (v_order.id, v_order.status, 'CLAIMED', p_officer_id, 'Merchandise released at booth terminal');
+  VALUES (v_order.id, v_order.status, v_result.status, p_officer_id,
+          format('Booth release: %s line(s) claimed; %s remaining', v_claimed_count, v_remaining));
 
   -- F13 fix: return the fresh post-claim row, not the stale pre-claim snapshot.
-  RETURN QUERY SELECT true, 'Merchandise successfully released.'::TEXT, to_jsonb(v_result);
+  RETURN QUERY SELECT true, format('%s line(s) released%s.', v_claimed_count,
+    CASE WHEN v_remaining = 0 THEN ' — order fully CLAIMED' ELSE ' — order PARTIALLY_CLAIMED' END)::TEXT, to_jsonb(v_result);
 END;
 $$;
 
 -- REVOKE FROM PUBLIC; grant to officer roles only (apply in migration):
--- REVOKE ALL ON FUNCTION confirm_order_pickup(TEXT, UUID) FROM PUBLIC;
--- GRANT EXECUTE ON FUNCTION confirm_order_pickup(TEXT, UUID) TO authenticated;
+-- REVOKE ALL ON FUNCTION confirm_order_pickup(TEXT, UUID, UUID[]) FROM PUBLIC;
+-- GRANT EXECUTE ON FUNCTION confirm_order_pickup(TEXT, UUID, UUID[]) TO authenticated;
 ```
 
-### 3.2 Officer Cash Order Creation (D-06/D-07/D-08 — sole cash write path)
+### 3.2 Officer Cash Order Creation — Multi-Line Bundle (D-10/D-11; sole cash write path, `p_lines JSONB`)
 
 ```sql
 -- Generates a collision-safe pickup code: 2-letter org prefix + 4 digits (e.g. CS-8419).
@@ -396,18 +447,16 @@ BEGIN
 END;
 $$;
 
--- Atomic F2F cash sale: find-or-create buyer (email required, REQ-22A), create order
--- directly as PAYMENT_VERIFIED (D-07, no TTL), branch PRE_ORDER vs FLASH.
--- Single-variant v1: p_variant_id + p_quantity + p_customization + p_student_id.
--- Multi-variant extension: loop with stable lock ordering by variant id.
+-- Atomic F2F cash bundle sale (v2.10 multi-line): find-or-create buyer (email required, REQ-22A),
+-- create order directly as PAYMENT_VERIFIED (D-07, no TTL), branch PRE_ORDER vs FLASH per campaign.
+-- p_lines JSONB: [{variant_id UUID, quantity INT>0, customization JSONB}] — 1..10 lines, single campaign scope.
+-- Locks variants FOR UPDATE ORDER BY id; any line failure rolls back the whole bundle.
 CREATE OR REPLACE FUNCTION create_cash_order(
   p_campaign_id UUID,
-  p_variant_id UUID,
-  p_quantity INT,
+  p_lines JSONB,
   p_buyer_name TEXT,
   p_buyer_email TEXT,
   p_buyer_mobile TEXT,
-  p_customization JSONB DEFAULT '{}'::jsonb,
   p_register_session_id UUID DEFAULT NULL,
   p_officer_id UUID DEFAULT NULL
 )
@@ -519,31 +568,51 @@ BEGIN
   END LOOP;
 
   INSERT INTO order_items (order_id, variant_id, unit_price, quantity, customization_data)
-  VALUES (v_order_id, p_variant_id, v_unit_price, p_quantity, COALESCE(p_customization, '{}'::jsonb));
+  -- v2.10: loop over p_lines in stable variant-id order (one row per line); unit_price frozen per line.
+  -- (Single-variant callers pass 1-element p_lines; equivalent to the retired p_variant_id/p_quantity form.)
 
   INSERT INTO order_status_history (order_id, from_status, to_status, actor_id, notes)
   VALUES (v_order_id, NULL, 'PAYMENT_VERIFIED', p_officer_id,
-          format('F2F cash collected under session %s', v_session.session_name));
+          format('F2F cash bundle collected under session %s (%s line(s))', v_session.session_name, jsonb_array_length(p_lines)));
 
   -- 8. Email trigger is application-layer (Supabase Auth / Google SMTP magic-link + receipt).
   --    MUST be queued after commit; send failure retries out-of-band and never rolls back this sale (D-08).
 
-  RETURN QUERY SELECT true, 'Cash order verified.'::TEXT, v_order_id, v_code;
+  RETURN QUERY SELECT true, 'Cash bundle verified.'::TEXT, v_order_id, v_code;
 END;
 $$;
 
 -- REVOKE FROM PUBLIC; grant to officer roles only (apply in migration):
--- REVOKE ALL ON FUNCTION create_cash_order(UUID, UUID, INT, TEXT, TEXT, TEXT, JSONB, UUID, UUID) FROM PUBLIC;
--- GRANT EXECUTE ON FUNCTION create_cash_order(UUID, UUID, INT, TEXT, TEXT, TEXT, JSONB, UUID, UUID) TO authenticated;
+-- REVOKE ALL ON FUNCTION create_cash_order(UUID, JSONB, TEXT, TEXT, TEXT, UUID, UUID) FROM PUBLIC;
+-- GRANT EXECUTE ON FUNCTION create_cash_order(UUID, JSONB, TEXT, TEXT, TEXT, UUID, UUID) TO authenticated;
 ```
+
+### 3.3 Digital Bundle Reservation — `reserve_cart()` (D-10; buyer Purchase, single TTL per bundle)
+
+```sql
+-- Atomic buyer bundle reservation: same-campaign p_lines (1..10 lines, ≤99 units),
+-- locks variants FOR UPDATE ORDER BY id, validates is_active + FLASH stock + per-variant /
+-- per-campaign caps, freezes unit_price, computes total = Σ price×qty, creates
+-- orders(status=PAYMENT_SUBMITTED or AWAITING_PAYMENT per flow) + N order_items,
+-- single reservation_expires_at = now() + 30 mins, single pickup_code issued at verify time
+-- (UC-06) — code column filled on PAYMENT_VERIFIED to satisfy NOT NULL/UNIQUE with deferred issue.
+-- Any line failure rolls back the whole bundle. Expiry job restores each line qty exactly once
+-- conditional on prior status (quantity-aware, F11). Idempotency: client supplies
+-- p_idempotency_key (UNIQUE per buyer+campaign, 24h) — retry returns existing order.
+-- SECURITY DEFINER, REVOKE FROM PUBLIC, buyer role may EXECUTE; server derives buyer from auth,
+-- never trusts caller-supplied buyer_id (F15). Full body follows the create_cash_order() locking/
+-- cap/total pattern above with payment_method IN ('DIGITAL_WALLET','BANK_TRANSFER'), RLS WITH CHECK
+-- digital-only (REQ-13B) preserved.
+```
+
 
 ---
 
-## 4. Row-Level Security (DEV-02 capability matrix — v2.9 officer-only cash)
+## 4. Row-Level Security (DEV-02 capability matrix — v2.10 cart/bundle)
 
 Enable RLS on all app tables and deny direct buyer cash writes. Privileged writes go through
-`§3.1` / `§3.2` (`SECURITY DEFINER`, `REVOKE FROM PUBLIC`, `GRANT EXECUTE` to `authenticated`;
-functions enforce active-role + same-org checks above — RLS alone does not constrain them, F15).
+`§3.1` / `§3.2` / `§3.3` (`SECURITY DEFINER`, `REVOKE FROM PUBLIC`, `GRANT EXECUTE` to `authenticated`;
+functions enforce active-role + same-org + single-campaign checks above — RLS alone does not constrain them, F15).
 
 ```sql
 ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
@@ -565,8 +634,8 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 |---|---|---|
 | `campaigns`, `product_variants` | Public/`anon` read when `status='LIVE'` (catalog) | Org officers (same `org_id`) `INSERT/UPDATE`; structural delete blocked with active orders (REQ-07) |
 | `buyers` | Owning buyer (`auth_user_id = auth.uid()`) or same-org officer | Officer `INSERT` (find-or-create in `create_cash_order`); owner self-`UPDATE` limited columns |
-| `orders` | Owning buyer (via `buyer.auth_user_id`) or same-org officer / platform admin | Buyer `INSERT` only `payment_method != 'CASH_ON_HAND'` + `status=AWAITING_PAYMENT/PAYMENT_SUBMITTED`; **no direct `INSERT CASH_ON_HAND`** (REQ-13B — enforced by policy `WITH CHECK (payment_method != 'CASH_ON_HAND')` for buyer role + function-only path for officers); status transitions only via functions / officer `UPDATE` with role check; buyers never `UPDATE status/verified/claimed/register/pickup_code` |
-| `order_items` | Same as parent order | Same as parent order; `unit_price` frozen from variant at insert |
+| `orders` | Owning buyer (via `buyer.auth_user_id`) or same-org officer / platform admin | Buyer `INSERT` only `payment_method != 'CASH_ON_HAND'` + `status=AWAITING_PAYMENT/PAYMENT_SUBMITTED` + single `campaign_id` per order (no cross-campaign lines; enforced in §3.3/§3.2, F07); **no direct `INSERT CASH_ON_HAND`** (REQ-13B — enforced by policy `WITH CHECK (payment_method != 'CASH_ON_HAND')` for buyer role + function-only path for officers); `total_amount` server-computed, buyers never `UPDATE total/status/verified/claimed/register/pickup_code`; header `CLAIMED` only via §3.1 when all lines claimed |
+| `order_items` | Same as parent order | Same as parent order; `unit_price` frozen from variant at insert; `variant.campaign_id` must equal `order.campaign_id` (F07); per-line claim cols writable only via §3.1 |
 | `order_status_history` | Same as parent order | `INSERT`-only via functions; no `UPDATE/DELETE` (append-only, F12) |
 | `register_sessions` | Same-org officers | Open: `CASHIER/TREASURER`; close: `closed_by` + distinct `cosigned_by` (`TREASURER`/auditor), variance note required on mismatch (constraint above, F10) |
 | `fee_settlements`, `refunds` | Same-org treasurer / platform admin | Treasurer/admin only |
@@ -586,9 +655,9 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 -- (No UPDATE/DELETE policies → denied.)
 ```
 
-**Migration order (F05):** enums → `organizations` → `users` → `buyers` → `campaigns` →
+**Migration order (F05):** enums (`order_item_status` + `PARTIALLY_CLAIMED`) → `organizations` → `users` → `buyers` → `campaigns` →
 `product_variants` (+CHECKs) → `register_sessions` → `orders` (+UNIQUE pickup, cash CHECKs) →
-`order_items` → `order_status_history` → `fee_settlements` → `refunds` → functions §3.1/§3.2 →
+`order_items` (+claim cols/CHECKs) → `order_status_history` → `fee_settlements` → `refunds` → functions §3.1/§3.2/§3.3 →
 `ENABLE RLS` + policies + `REVOKE/GRANT` → validate on empty Supabase-compatible DB.
 
 > **D-06 audit note (2026-10-01):** No data migration for legacy buyer cash `AWAITING_PAYMENT` rows is specified — repo is docs-only with no deployed rows. If any pre-v2.9 draft rows exist, treat buyer-created `CASH_ON_HAND/AWAITING_PAYMENT` as expired/cancelled and re-enter F2F via `create_cash_order()`.
