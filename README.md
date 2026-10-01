@@ -33,10 +33,11 @@ docs/
 
 ## Tech Stack & Infrastructure
 
-- **Frontend / Framework:** Next.js (App Router), TypeScript, TailwindCSS / Vanilla CSS
+- **Frontend / Framework:** Next.js (App Router), TypeScript, TailwindCSS
+- **Hosting:** Vercel (Free Tier)
 - **Backend & Database:** Supabase (PostgreSQL with Row Level Security, Triggers & Atomic Functions)
-- **Object Storage:** Cloudflare R2 / AWS S3 (Receipt screenshots, product mockups)
-- **Transactional Notifications:** Google SMTP (Email magic links & status updates)
+- **Object Storage:** Cloudflare R2 only (private: receipt screenshots, fee/refund proofs; public cacheable: org logos/banners, campaign covers/gallery — D-16)
+- **Transactional Notifications:** Supabase Auth sending via Google SMTP — direct sender for email magic links & status updates
 
 ---
 

@@ -1,7 +1,7 @@
 # Database Schema Definition (Supabase / PostgreSQL)
 ## Project Ebisu — Campus Merch Platform
 
-> **v2.11 (D-12 rejected-terminal/reorder + D-13 normalized ref/blocking Option A + D-14 /track counterpart + D-15 unit-level partial pickup, 2026-10-01):** `REJECTED` terminal (releases stock, reorder as new order; no resubmit). `payment_reference` normalized (`UPPER(TRIM())`, strip spaces/dashes) globally UNIQUE; `REJECTED` refs never freed, `CANCELLED` freed after 24h. `/track` → `/orders` list → `/orders/[id]` counterpart to per-order magic-link emails (pure magic-link, no passwords). `confirm_order_pickup(code, officer, p_claims JSONB [{item_id, qty}])` claims unit-level qty (`quantity_claimed += qty`). Retains v2.10 bundle cart, cash CHECKs, `pickup_code UNIQUE`, ordered DDL, RLS matrix.
+> **v2.12 (D-16 org/campaign imagery on public-read R2 prefix, 2026-10-01):** `organizations.logo_url/banner_url` nullable public R2; `campaigns.cover_image_url` nullable public R2; new `campaign_images` gallery (max 8 per campaign, app-enforced). Builds on v2.11 (D-12 rejected-terminal/reorder + D-13 normalized ref/blocking Option A + D-14 /track counterpart + D-15 unit-level partial pickup).
 
 This document defines the relational database schema, custom enum types, table constraints, row-level security (RLS) policies, and atomic functions for **Project Ebisu**.
 
@@ -102,6 +102,8 @@ CREATE TABLE organizations (
   is_active BOOLEAN NOT NULL DEFAULT true,
   fee_exempt BOOLEAN NOT NULL DEFAULT false,
   moa_reference_url TEXT,
+  logo_url TEXT, -- D-16: nullable public-read R2 (public/orgs/{org_id}/logo)
+  banner_url TEXT, -- D-16: nullable public-read R2 (public/orgs/{org_id}/banner)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -146,8 +148,20 @@ CREATE TABLE campaigns (
   fee_policy_version TEXT NOT NULL DEFAULT 'v2.7-banded', -- D-04: banded fee (5% / 5 / 10 / 15) + ₱100 minimum; replaces per_item_fee
   fee_status fee_status NOT NULL DEFAULT 'UNPAID',
   payment_instructions JSONB NOT NULL DEFAULT '{}'::jsonb,
+  cover_image_url TEXT, -- D-16: nullable public-read R2 (public/campaigns/{campaign_id}/cover)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Campaign mockup gallery (D-16: 1 cover on campaigns + max 8 gallery rows here, app-enforced)
+CREATE TABLE campaign_images (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL, -- public-read R2 (public/campaigns/{campaign_id}/gallery/{image_id})
+  sort_order INT NOT NULL DEFAULT 0,
+  uploaded_by_officer_id UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT campaign_images_sort_nonneg CHECK (sort_order >= 0)
 );
 
 -- Product Variants (Size, Color, Cut)
@@ -624,6 +638,7 @@ ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE buyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE campaigns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE campaign_images ENABLE ROW LEVEL SECURITY;
 ALTER TABLE product_variants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
@@ -638,6 +653,8 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 | Table | Read | Write |
 |---|---|---|
 | `campaigns`, `product_variants` | Public/`anon` read when `status='LIVE'` (catalog) | Org officers (same `org_id`) `INSERT/UPDATE`; structural delete blocked with active orders (REQ-07) |
+| `organizations` branding cols (`logo_url`, `banner_url`) + `campaigns.cover_image_url` | Public/`anon` read (image URLs are public-cacheable, D-16) | Same-org `TREASURER`/`VOLUNTEER` (platform admin override); `CASHIER` denied; Superadmin may blank abusive images |
+| `campaign_images` | Public/`anon` read (public gallery, D-16) | Same-org `TREASURER`/`VOLUNTEER` `INSERT/UPDATE/DELETE` (max 8 per campaign, app-enforced); cascades on campaign delete |
 | `buyers` | Owning buyer (`auth_user_id = auth.uid()`) or same-org officer | Officer `INSERT` (find-or-create in `create_cash_order`); owner self-`UPDATE` limited columns |
 | `orders` | Owning buyer (via `buyer.auth_user_id`; `/track` + per-order emails resolve to same account, D-14) or same-org officer / platform admin | Buyer `INSERT` only `payment_method != 'CASH_ON_HAND'` + `status=AWAITING_PAYMENT/PAYMENT_SUBMITTED` + single `campaign_id` per order (no cross-campaign lines; enforced in §3.3/§3.2, F07); **no direct `INSERT CASH_ON_HAND`** (REQ-13B — enforced by policy `WITH CHECK (payment_method != 'CASH_ON_HAND')` for buyer role + function-only path for officers); `total_amount` server-computed, buyers never `UPDATE total/status/verified/claimed/register/pickup_code`; header `CLAIMED` only via §3.1 when all qtys claimed; `REJECTED` terminal, no buyer-side status flip (D-12) |
 | `order_items` | Same as parent order | Same as parent order; `unit_price` frozen from variant at insert; `variant.campaign_id` must equal `order.campaign_id` (F07); per-qty claim cols (`quantity_claimed`) writable only via §3.1 (D-15) |
@@ -660,11 +677,13 @@ ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;
 -- (No UPDATE/DELETE policies → denied.)
 ```
 
-**Migration order (F05):** enums (`order_item_status` + `PARTIALLY_CLAIMED`) → `organizations` → `users` → `buyers` → `campaigns` →
-`product_variants` (+CHECKs) → `register_sessions` → `orders` (+UNIQUE pickup, cash CHECKs) →
+**Migration order (F05):** enums (`order_item_status` + `PARTIALLY_CLAIMED`) → `organizations` (+D-16 branding cols) → `users` → `buyers` → `campaigns` (+D-16 `cover_image_url`) →
+`campaign_images` (D-16, after `campaigns`) → `product_variants` (+CHECKs) → `register_sessions` → `orders` (+UNIQUE pickup, cash CHECKs) →
 `order_items` (+claim cols/CHECKs) → `order_status_history` → `fee_settlements` → `refunds` → functions §3.1/§3.2/§3.3 →
 `ENABLE RLS` + policies + `REVOKE/GRANT` → validate on empty Supabase-compatible DB.
 
 > **D-06 audit note (2026-10-01):** No data migration for legacy buyer cash `AWAITING_PAYMENT` rows is specified — repo is docs-only with no deployed rows. If any pre-v2.9 draft rows exist, treat buyer-created `CASH_ON_HAND/AWAITING_PAYMENT` as expired/cancelled and re-enter F2F via `create_cash_order()`.
 
 > **D-12/D-13 audit note (2026-10-01, v2.11):** No `payment_attempts` table (Option A: single mutable proof slot). `REJECTED` refs stay in `orders.payment_reference` UNIQUE and are never reused; `CANCELLED`/expired refs freed after 24h by job. No migration for pre-v2.11 `REJECTED`-resubmitted rows — repo is docs-only. Buyer portal is pure magic-link (no passwords); `/track` list and per-order emails resolve via `buyers.email UNIQUE → auth_user_id`.
+
+> **D-16 audit note (2026-10-01, v2.12):** No backfill — repo is docs-only. Storage keys are UUID-based (`public/orgs/{org_id}/logo|banner`, `public/campaigns/{campaign_id}/cover|gallery/{image_id}`), never slug-derived; replace uses content-hash filename + atomic URL update, old object deleted async. Upload validation (JPG/PNG/WebP only, SVG rejected, logo ≤2MB, banner/cover/gallery ≤5MB, EXIF strip, re-encode) and gallery cap (max 8) are app-layer via presigned-PUT route, not DB CHECKs. Suspend/cancel hides but retains images. `moa_reference_url` unchanged. No `product_variants.image_url` in v1.

@@ -1,7 +1,7 @@
 # Software Requirements Specification (SRS)
 ## Project Ebisu — Campus Merch Platform
 
-**Document Status:** v2.11 — Canonical Engineering Reference (D-12 rejected-terminal/reorder + D-13 ref normalization/blocking Option A + D-14 /track portal counterpart + D-15 unit-level partial pickup approved 2026-10-01, builds on v2.10 D-10/D-11)  
+**Document Status:** v2.12 — Canonical Engineering Reference (D-16 org/campaign imagery: logo + banner + campaign covers on public-read R2 prefix approved 2026-10-01, builds on v2.11 D-12/D-13/D-14/D-15)  
 **Prepared For:** Full-Stack Engineering Team  
 
 ---
@@ -15,7 +15,7 @@ This specification translates the functional product requirements for **Project 
 The system is a multi-tenant campus commerce platform enabling accredited student organizations and councils to run **Batch Pre-Order campaigns** and **In-Stock Flash Drops**, receive direct buyer payments (GCash, Maya, Bank Transfer via buyer checkout; Cash on Hand via officer-only F2F terminal — D-06), unlock tailor production sheets through a banded platform service fee with a per-campaign minimum (D-04), and distribute merchandise at campus booths via an alphanumeric pick-up code dispatch terminal.
 
 #### In Scope for v1:
-* **Org-Scoped Campaigns:** Multi-attribute variant matrices (size, color, cut) and optional institutional ID gating.
+* **Org-Scoped Campaigns:** Multi-attribute variant matrices (size, color, cut) and optional institutional ID gating. Each org carries a public logo + banner (D-16) rendered in the discovery feed, campaign pages, and accreditation queue; each campaign carries a public cover + optional mockup gallery (max 8 images). Variants reuse the campaign cover in v1 (no per-variant images).
 * **Buyer Checkout (campaign-scoped cart — D-10/D-11):** Guest cart in localStorage per `campaign_id` (no reservation while browsing; auth only at Purchase). Passwordless Buyer identity (Supabase Auth magic links via Google SMTP), single atomic bundle reservation with TTL (30 mins per order, digital only — D-06). One payment proof + reference per order, one pick-up code per bundle, partial line-level pickup supported. Cash has no buyer reservation/TTL; officer creates multi-line cash orders directly as `PAYMENT_VERIFIED`.
 * **Operational Verification Desk:** Triage queues for digital payment proofs (cross-wallet/InstaPay support) and officer-only F2F cash terminal under an active register session (D-06).
 * **Audit Persistence:** Permanent transaction histories, downloadable digital receipts, and audit trails for buyers and student organizations.
@@ -100,7 +100,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 * **Precondition:** Org is accredited and active.
 * **Main Flow:**
   1. Officer selects campaign type (`PRE_ORDER` or `FLASH`).
-  2. Uploads mockups, sets title, description, and base price.
+  2. Uploads cover + optional mockup gallery (1 cover + up to 8 gallery images, JPG/PNG/WebP only, SVG rejected; logo ≤2MB, banner/cover/gallery ≤5MB; EXIF stripped; stored under public-read R2 prefix `public/campaigns/{campaign_id}/` — D-16), sets title, description, and base price.
   3. Configures variant matrix (sizes, cuts, colors) and custom text personalization fields.
   4. Sets Student ID requirement policy (`MANDATORY` or `OPTIONAL`).
   5. For Pre-Orders: sets MOQ target count and campaign cutoff deadline.
@@ -112,7 +112,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-02: Edit Live Campaign**
 * **Actor:** Org Officer
 * **Precondition:** Campaign is `LIVE`.
-* **Main Flow:** Officer modifies non-structural attributes (deadline extensions, announcements, photos).
+* **Main Flow:** Officer modifies non-structural attributes (deadline extensions, announcements, cover/gallery images — D-16: cover replace or gallery add/remove/reorder; allowed while `LIVE`).
 * **Exception Flow:** Structural changes to variants with existing orders are blocked; variants can only be flagged as inactive for future orders.
 * **Related Requirements:** `REQ-07`
 
@@ -264,7 +264,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 
 #### **UC-16: Vet Organization Accreditation**
 * **Actor:** Platform Superadmin, Platform Owner
-* **Main Flow:** Review council accreditation credentials -> grant active merchant status.
+* **Main Flow:** Review council accreditation credentials plus submitted logo/banner (D-16: JPG/PNG/WebP, public-read R2 `public/orgs/{org_id}/`; submittable at `PENDING`, editable after `ACCREDITED`) -> grant active merchant status. Superadmin may blank an abusive/misleading logo or banner without de-accrediting the org (rejection note recorded).
 
 #### **UC-17: Clear Platform Fee Settlement**
 * **Actor:** Platform Superadmin, Platform Owner
@@ -343,6 +343,9 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 | REQ-48 | Isolate booth distribution tools so fee disputes never block merch releases on campus | Cross-cutting | UC-13 | Must |
 | REQ-80 | `PLATFORM_OWNER`'s capability set is a strict superset of `SUPERADMIN` | Governance | UC-16 - UC-20 | Must |
 | REQ-81 | The self-dealing recusal rule applies only to `SUPERADMIN`; `PLATFORM_OWNER` actions are never blocked by target org | Governance | UC-16 - UC-19 | Must |
+| REQ-49 | Support org logo + banner (nullable `logo_url`, `banner_url` on `organizations`; JPG/PNG/WebP, SVG rejected; logo ≤2MB, banner ≤5MB; UUID-keyed public-read R2 `public/orgs/{org_id}/`; placeholder fallback, never blocks checkout/dispatch) | Campaign Mgmt / Governance | UC-01, UC-16 | Should |
+| REQ-50 | Support campaign cover + mockup gallery (nullable `cover_image_url` on `campaigns` + `campaign_images` gallery, 1 cover + max 8 gallery, same file/size rules; public-read R2 `public/campaigns/{campaign_id}/`; editable while `LIVE` per UC-02) | Campaign Mgmt | UC-01, UC-02 | Should |
+| REQ-51 | Enforce public-vs-private storage split: branding/campaign images are public-cacheable (`Cache-Control: public, max-age=31536000, immutable` on content-hashed replace); receipts, fee proofs, and refund proofs stay private via signed URLs with permanent retention | Cross-cutting | UC-04, UC-06, UC-10, UC-16 | Must |
 
 ---
 
@@ -357,7 +360,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 Zero dedicated hardware interfaces. The system operates on commodity smartphones, tablets, and laptops without external scanners or printers.
 
 ### 5.3 Software Interfaces
-* **Object Storage:** Cloudflare R2 only for persistent receipt screenshots, product mockups, and refund receipts.
+* **Object Storage:** Cloudflare R2 only — private signed-URL storage for persistent receipt screenshots, fee proofs, and refund receipts; public-read cacheable prefix for org logos/banners (`public/orgs/{org_id}/`) and campaign covers/gallery (`public/campaigns/{campaign_id}/`) — D-16. Storage keys are UUID-based (never slug/name-derived) with content-hash filenames on replace.
 * **Transactional Email:** Supabase Auth sending via Google SMTP (direct sender) to deliver passwordless magic links and status notifications.
 * **Database & Persistence:** Supabase (PostgreSQL) with atomic transactional updates, row-level security (RLS), strict uniqueness constraints, and append-only audit tables.
 
@@ -373,7 +376,7 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 | **Performance** | Pick-up Code lookups at the booth terminal must execute in sub-second time to prevent distribution line congestion. |
 | **Concurrency & Integrity** | Flash drop checkouts must use atomic decrement operations to prevent overselling. Multiple officers dispatching items simultaneously must never result in duplicate item releases. |
 | **System Availability** | Booth distribution interfaces must remain completely operational during events, decoupled from administrative or fee-clearance modules. |
-| **Data Security** | Payment receipts and transaction identifiers must be protected against tampering. Production spreadsheet exports must be sanitized against formula injection vulnerabilities (`'`, `=`, `+`, `-`, `@`). Order history and uploaded proofs persist permanently. |
+| **Data Security** | Payment receipts and transaction identifiers must be protected against tampering. Production spreadsheet exports must be sanitized against formula injection vulnerabilities (`'`, `=`, `+`, `-`, `@`). Order history and uploaded proofs persist permanently. Public branding images carry no PII, are served with immutable cache headers, reject SVG uploads (XSS), enforce size caps, and strip EXIF (D-16). |
 | **Usability** | Verification Desk and Booth Dispatch interfaces must be optimized for fast operation by non-technical student volunteers in noisy, crowded campus settings. |
 | **Financial Auditability** | Every transaction, payment approval, refund, cash handover, and item release must maintain complete chronological attribution to a specific officer. |
 
@@ -383,10 +386,11 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 
 | Entity | Key Attributes | Structural Purpose |
 |---|---|---|
-| `Organization` | `id`, `name`, `accreditation_status`, `is_active` | Multi-tenant parent entity owning campaigns |
+| `Organization` | `id`, `name`, `accreditation_status`, `is_active`, `logo_url`, `banner_url` (nullable public R2 URLs, D-16) | Multi-tenant parent entity owning campaigns |
 | `User` (Officer/Admin) | `id`, `org_id`, `name`, `email`, `role_tag` (`TREASURER`, `CASHIER`, `VOLUNTEER`, `SUPERADMIN`, `PLATFORM_OWNER`) | Authorizes operational actions and gates Treasurer overrides |
 | `Buyer` | `id`, `name`, `email`, `mobile_number`, `created_at` | Passwordless identity for purchase caps and order tracking |
-| `Campaign` | `id`, `org_id`, `type` (`PRE_ORDER`, `FLASH`), `status`, `moq_target`, `deadline_at`, `fee_policy_version`, `fee_status`, `require_student_id` | Central campaign coordinator and lifecycle machine |
+| `Campaign` | `id`, `org_id`, `type` (`PRE_ORDER`, `FLASH`), `status`, `moq_target`, `deadline_at`, `fee_policy_version`, `fee_status`, `require_student_id`, `cover_image_url` (nullable public R2 URL, D-16) | Central campaign coordinator and lifecycle machine |
+| `CampaignImage` | `id`, `campaign_id`, `image_url`, `sort_order` | Optional mockup gallery (max 8 per campaign, D-16; cascades on campaign delete) |
 | `ProductVariant` | `id`, `campaign_id`, `sku`, `attributes` (size/color), `price`, `stock_remaining`, `variant_purchase_cap` | Defines purchasable options and tracks inventory |
 | `Order` | `id`, `campaign_id`, `buyer_id`, `status` (incl. `PARTIALLY_CLAIMED`), `total_amount = Σ line totals (server-computed)`, `payment_method`, `source_channel` (single per bundle), `payment_reference` (single per bundle, UNIQUE), `receipt_image_url` (single per bundle), `pickup_code` (single per bundle, UNIQUE), `reservation_expires_at` (single per bundle), `claimed_at`, `claimed_by_officer_id` | Core transactional record (bundle header). Persists permanently to allow customer and merchant self-auditing |
 | `OrderItem` | `id`, `order_id`, `variant_id`, `unit_price` (frozen), `quantity`, `quantity_claimed`, `status` (`READY_FOR_PICKUP`/`CLAIMED`), `customization_data` (printed name/number), `claimed_at`, `claimed_by_officer_id` | Granular bundle lines with unit-level partial-claim tracking (`quantity_claimed += qty`, D-15) |
@@ -437,3 +441,4 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 20. **Reference Normalization + Blocking (D-13 / Option A):** Resolved 2026-10-01 — `payment_reference` normalized (`UPPER(TRIM())`, strip spaces/dashes) before global UNIQUE check. Single mutable proof slot retained (no `payment_attempts` table). `REJECTED` refs never freed; `CANCELLED`/expired refs freed after 24h; typo-squat release is Treasurer/Superadmin-only with audit note.
 21. **Buyer Portal Counterpart (D-14):** Resolved 2026-10-01 — No buyer passwords (password feature moot: orders unified by `buyers.email UNIQUE`). `/track` (email → magic link → `/orders` Current/Past list → `/orders/[id]`) is a counterpart to per-order magic-link emails (purchase/verify/ready/cash tracker), which remain in place. Each email embeds a fresh link to the same account.
 22. **Unit-Level Partial Pickup (D-15):** Resolved 2026-10-01 — Dispatch claims arbitrary qty per line (`quantity_claimed += qty`, `p_claims JSONB [{item_id, qty}]`); line `CLAIMED` only when fully claimed. Whole-line claim remains the `qty = remaining` case. Unit-level chosen over line-only for booth flexibility despite extra stepper/race handling.
+23. **Org/Campaign Imagery on Public-Read R2 Prefix (D-16):** Resolved 2026-10-01 — Scope is logo + banner (org) + cover + gallery (campaign); no generic media table and no per-variant images in v1 (variants reuse campaign cover). Branding images are nullable public-cacheable R2 objects (`public/orgs/{org_id}/logo|banner`, `public/campaigns/{campaign_id}/cover|gallery/{image_id}`), UUID-keyed with content-hash filenames on replace. Upload contract: server-issued presigned PUT via officer-only Next.js route (same-org `TREASURER`/`VOLUNTEER`, platform admin override; `CASHIER` excluded), JPG/PNG/WebP only (SVG rejected for XSS), logo ≤2MB / banner-cover-gallery ≤5MB, EXIF stripped, server-side re-encode. Caps: 1 logo + 1 banner per org; 1 cover + max 8 gallery per campaign. Suspend/cancel hides but retains images (audit parity); orphan cleanup is async (overwrite-same-key or delete-old-hash + nightly prefix-vs-DB sweep). `moa_reference_url` stays as-is (external vs R2 undecided). R2 10GB pressure tracked under pilot capacity.
