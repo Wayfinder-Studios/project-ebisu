@@ -1,7 +1,7 @@
 # Software Requirements Specification (SRS)
 ## Project Ebisu — Campus Merch Platform
 
-**Document Status:** v2.9 — Canonical Engineering Reference (D-06 officer-only cash approved 2026-10-01, builds on D-05 stack reconciliation 2026-09-30)  
+**Document Status:** v2.10 — Canonical Engineering Reference (D-10 campaign-scoped cart + D-11 guest cart/partial-pickup approved 2026-10-01, builds on D-06 officer-only cash 2026-10-01, D-05 stack reconciliation 2026-09-30)  
 **Prepared For:** Full-Stack Engineering Team  
 
 ---
@@ -16,7 +16,7 @@ The system is a multi-tenant campus commerce platform enabling accredited studen
 
 #### In Scope for v1:
 * **Org-Scoped Campaigns:** Multi-attribute variant matrices (size, color, cut) and optional institutional ID gating.
-* **Buyer Checkout:** Passwordless Buyer identity (Supabase Auth magic links via Google SMTP), source-wallet tracking, and atomic inventory reservation with TTL (30 mins, digital only — D-06). Cash has no buyer reservation/TTL; officer creates cash orders directly as `PAYMENT_VERIFIED`.
+* **Buyer Checkout (campaign-scoped cart — D-10/D-11):** Guest cart in localStorage per `campaign_id` (no reservation while browsing; auth only at Purchase). Passwordless Buyer identity (Supabase Auth magic links via Google SMTP), single atomic bundle reservation with TTL (30 mins per order, digital only — D-06). One payment proof + reference per order, one pick-up code per bundle, partial line-level pickup supported. Cash has no buyer reservation/TTL; officer creates multi-line cash orders directly as `PAYMENT_VERIFIED`.
 * **Operational Verification Desk:** Triage queues for digital payment proofs (cross-wallet/InstaPay support) and officer-only F2F cash terminal under an active register session (D-06).
 * **Audit Persistence:** Permanent transaction histories, downloadable digital receipts, and audit trails for buyers and student organizations.
 * **MOQ Evaluation:** Automated target checking at campaign deadline, 48-hour Treasurer-gated override window, and a Batch Refund Queue.
@@ -123,31 +123,36 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-03A: Establish Buyer Account (Passwordless)**
 * **Actor:** Buyer
 * **Precondition:** Buyer provides full name, email address, and mobile number.
-* **Main Flow:** Triggered during first checkout or when accessing order history -> system emails a magic link -> buyer clicks link -> establishes persistent authenticated session without passwords.
+* **Main Flow:** Triggered at Purchase (not at Add to Cart) or when accessing order history -> system emails a magic link -> buyer clicks link -> establishes persistent authenticated session without passwords. Guest browsing + cart building requires no auth (D-11).
 * **Related Requirements:** `REQ-08A`
 
-#### **UC-03: Browse and Reserve Variant**
-* **Actor:** Buyer
+#### **UC-03: Browse Campaign Grid and Build Cart (Guest, Local-Only — D-10/D-11)**
+* **Actor:** Buyer (guest allowed)
 * **Precondition:** Campaign is `LIVE` and before deadline or has available stock.
-* **Main Flow:** Buyer views drop feed, selects attributes (size, cut, color), fills required personalization fields (e.g., jersey back name, student ID if enforced) -> proceeds to checkout.
-* **Postcondition:** For Flash drops, inventory is atomically decremented and placed under a Reservation TTL.
+* **Main Flow:**
+  1. Buyer selects a campaign -> sees grid of `is_active` variants (title, attributes, price, stock/MOQ state; sold-out disabled).
+  2. Buyer clicks a variant -> detail sheet -> inputs qty + per-line personalization (e.g., jersey back name) + student ID if `require_student_id` -> clicks **Add to Cart**.
+  3. Cart (`localStorage["ebisu:cart:{campaign_id}"]`, max 10 lines / 99 units) updates with badge + drawer (line edit qty/remove, estimated total from catalog price). No DB reservation, no TTL, no auth at this stage. Stock badge is advisory only.
+  4. Rinse and repeat within the same campaign. Switching campaigns uses a separate cart; UI warns before clearing/discarding when switching (single-campaign rule: 1 cart = 1 campaign = 1 order).
+* **Postcondition:** Local cart only. Authoritative stock/cap/price checks occur at UC-04 Purchase.
 * **Related Requirements:** `REQ-08` to `REQ-11`
 
-#### **UC-04: Checkout and Payment Submission (Digital Only — D-06)**
+#### **UC-04: Purchase Cart and Payment Submission (Digital Only — D-06, Bundle — D-10)**
 * **Actor:** Buyer
-* **Precondition:** Valid reservation within TTL window (digital only).
+* **Precondition:** Local cart has 1–10 lines, all same `campaign_id`, all `is_active`; buyer authenticates via magic link at Purchase if guest.
 * **Main Flow:**
-  - *Digital Wallet / Bank Transfer:* Buyer selects `Source Channel` (GCash, Maya, GoTyme, BDO, BPI, Other) -> inputs transaction reference number / InstaPay Trace ID -> uploads receipt screenshot -> submits -> `PAYMENT_SUBMITTED`.
-  - *Cash on Hand:* Not offered in buyer UI. Buyers paying cash transact F2F at the booth; the officer creates the order via UC-07. Any legacy `AWAITING_PAYMENT` cash-reservation path is retired.
-* **Exception Flow (Duplicate Reference):** Reference number already exists in database across any campaign -> entry rejected immediately (`REQ-14`; cash `NULL` references exempt).
-* **Exception Flow (TTL Expiry):** Payment proof not submitted within 30 minutes -> reservation auto-cancels and variant inventory restores by reserved quantity.
+  1. Buyer clicks **Checkout / Purchase** -> server runs atomic `reserve_cart()` in one transaction: locks all variants `FOR UPDATE ORDER BY id`, validates same-campaign/same-org, `is_active`, FLASH stock sufficiency, per-variant + per-campaign purchase caps, freezes `unit_price` from catalog, computes `total_amount = Σ unit_price × qty`, `INSERT orders + N order_items`, starts single 30-min TTL -> `PAYMENT_SUBMITTED` hold. Any line fails -> whole bundle rolls back.
+  2. *Digital Wallet / Bank Transfer:* Buyer selects `Source Channel` (GCash, Maya, GoTyme, BDO, BPI, Other) -> inputs single transaction reference number / InstaPay Trace ID for the bundle total -> uploads receipt screenshot -> submits -> `PAYMENT_SUBMITTED`.
+  - *Cash on Hand:* Not offered in buyer UI. Buyers paying cash transact F2F at the booth; the officer creates the multi-line order via UC-07. Any legacy `AWAITING_PAYMENT` cash-reservation path is retired.
+* **Exception Flow (Duplicate Reference):** Reference number already exists in database across any campaign -> entry rejected immediately (`REQ-14`; cash `NULL` references exempt). One reference covers the whole bundle.
+* **Exception Flow (TTL Expiry):** Payment proof not submitted within 30 minutes -> bundle auto-cancels and each line's reserved quantity restores exactly once (conditional on prior status, quantity-aware).
 * **Related Requirements:** `REQ-11`, `REQ-12` to `REQ-14`, `REQ-16`, `REQ-13B`
 
 #### **UC-05: Track Order, View Receipts & Resubmit Payment**
 * **Actor:** Buyer
 * **Precondition:** Buyer authenticated via magic link.
-* **Main Flow:** Buyer views permanent purchase history and real-time order status (digital: `Awaiting Payment` -> `Payment Verified` -> `In Production` -> `Ready for Pick-up` -> `Claimed`; officer-entered cash starts at `Payment Verified` — D-06) along with uploaded receipts (digital) and full item breakdowns.
-* **Alternate Flow (Resubmission, digital only):** If a digital order is flagged `REJECTED`, buyer reviews the officer's rejection note, edits reference number/channel, uploads new proof, and resubmits without losing their reserved order item. Cash orders have no rejection/resubmission path.
+* **Main Flow:** Buyer views permanent purchase history and real-time order status (digital: `Awaiting Payment` -> `Payment Verified` -> `In Production` -> `Ready for Pick-up` -> `Partially Claimed` -> `Claimed`; officer-entered cash starts at `Payment Verified` — D-06) with per-line status dots, along with uploaded receipt (digital, single proof per bundle) and full line-item breakdowns.
+* **Alternate Flow (Resubmission, digital only):** If a digital order is flagged `REJECTED`, buyer reviews the officer's rejection note, edits reference number/channel, uploads new proof, and resubmits without losing the reserved bundle (same `order_id`, lines retained). Cash orders have no rejection/resubmission path.
 * **Related Requirements:** `REQ-17`, `REQ-17A`
 
 ---
@@ -161,13 +166,14 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 * **Postcondition:** Order transitions to `PAYMENT_VERIFIED` (generating a pick-up code) or `REJECTED`.
 * **Related Requirements:** `REQ-18` to `REQ-20`
 
-#### **UC-07: Create-and-Verify F2F Cash Order (Officer-Only — D-06/D-07)**
+#### **UC-07: Create-and-Verify F2F Cash Order (Officer-Only Multi-Line — D-06/D-07/D-10)**
 * **Actor:** Org Officer (Cashier / Volunteer / Treasurer)
 * **Precondition:** Active Daily Register Session open at booth (`status=OPEN`, same org); campaign is `LIVE`; buyer present F2F with cash.
-* **Main Flow (unified form with campaign-type branching):** Officer selects campaign -> selects variant/qty + personalization/student-ID -> finds-or-creates buyer (name + **email required** + mobile; duplicate email reuses `buyers` row) -> accepts cash -> submits via `create_cash_order()` in one atomic transaction:
-  - *PRE_ORDER:* no stock decrement; order created directly as `PAYMENT_VERIFIED` and counts toward MOQ immediately.
-  - *FLASH:* atomic `stock_remaining` decrement (row `FOR UPDATE`) + purchase-cap check in the same transaction; sold-out variants disabled.
-  System tags `register_session_id`, `verified_by_officer_id` (= collecting officer), `verified_at=now()`, `payment_method=CASH_ON_HAND`, `source_channel='Cash'`, generates `pickup_code`, writes `order_status_history`, and emails the buyer a magic-link tracker + claim-pass link (REQ-22A; email retry without rolling back the order).
+* **Main Flow (unified form with campaign-type branching, multi-line):** Officer selects campaign (locks cart scope to that campaign) -> adds 1–10 lines each with variant/qty + personalization/student-ID -> finds-or-creates buyer (name + **email required** + mobile; duplicate email reuses `buyers` row) -> accepts single cash tender for bundle total -> submits via `create_cash_order(p_lines JSONB)` in one atomic transaction:
+  - Locks all variants `FOR UPDATE ORDER BY id`; validates same-campaign/same-org, `is_active`.
+  - *PRE_ORDER:* no stock decrement; order created directly as `PAYMENT_VERIFIED` and each line qty counts toward MOQ immediately.
+  - *FLASH:* atomic per-line `stock_remaining` decrement + per-variant + per-campaign purchase-cap checks in the same transaction; sold-out variants disabled.
+  System tags `register_session_id`, `verified_by_officer_id` (= collecting officer), `verified_at=now()`, `payment_method=CASH_ON_HAND`, `source_channel='Cash'`, server-computed `total_amount = Σ unit_price × qty` (frozen prices), generates single `pickup_code` for the bundle, writes `order_items` + `order_status_history`, and emails the buyer a magic-link tracker + claim-pass link (REQ-22A; email retry without rolling back the order).
 * **Exception Flow:** No `OPEN` session, closed session mid-submit, sold-out race, cross-org campaign/variant/session, or missing email -> transaction aborts with explicit officer-facing error; cash handed back; nothing partially written.
 * **Postcondition:** Order is `PAYMENT_VERIFIED` at creation (skips `AWAITING_PAYMENT`; no TTL). Retires the old "verify existing cash reservation / Quick Order Entry as secondary path" model.
 * **Related Requirements:** `REQ-21`, `REQ-22`, `REQ-22A`, `REQ-13B`, `REQ-41`
@@ -179,7 +185,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-08: Evaluate MOQ at Deadline**
 * **Actor:** System (automated), Org Treasurer
 * **Precondition:** Pre-Order deadline reached.
-* **Main Flow:** System tallies total verified orders against `moq_target`.
+* **Main Flow:** System tallies total verified **units** (`SUM(order_items.quantity)` over orders in `PAYMENT_VERIFIED/IN_PRODUCTION/READY_FOR_PICKUP/CLAIMED/PARTIALLY_CLAIMED`) against `moq_target`. Multi-line bundles contribute each line qty (D-10 fix for F04).
   - *MOQ Met:* Auto-transitions to `CLOSED_PENDING_PRODUCTION`.
   - *MOQ Missed:* Transitions to `MOQ_FAILED`; opens a 48-hour decision grace period.
 * **Alternate Flow (Treasurer Override):** Only an officer tagged as **Treasurer** can tap **"Proceed Anyway (Cover Deficit)"** within 48 hours -> campaign advances to `CLOSED_PENDING_PRODUCTION`.
@@ -221,16 +227,16 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-12: Access Digital Claim Pass**
 * **Actor:** Buyer
 * **Precondition:** Order is `PAYMENT_VERIFIED` and campaign is `READY_FOR_PICKUP`.
-* **Main Flow:** Buyer opens Order Tracker -> displays high-contrast digital claim pass featuring alphanumeric Pick-up Code (e.g., `CS-8419`), verified variant specifications, and buyer name -> taps **Save to Gallery** for offline presentation.
-* **Related Requirements:** `REQ-34`, `REQ-35`
+* **Main Flow:** Buyer opens Order Tracker -> displays high-contrast digital claim pass featuring single alphanumeric Pick-up Code (e.g., `CS-8419`) for the whole bundle, per-line variant specs with per-line claim state (`Ready` / `Claimed x/y`), and buyer name -> taps **Save to Gallery** for offline presentation.
+* **Related Requirements:** `REQ-34`, `REQ-35`, `REQ-34A`
 
-#### **UC-13: Dispatch Merchandise at Booth (Online Terminal)**
+#### **UC-13: Dispatch Merchandise at Booth (Online Terminal, Partial Pickup — D-11)**
 * **Actor:** Org Officer
 * **Precondition:** Campaign is `READY_FOR_PICKUP`; officer terminal has active internet connectivity.
-* **Main Flow:** Officer asks for Pick-up Code -> types code into auto-focused search bar -> order record loads with item specs, customization details, and verified payment badge -> officer checks physical university/government ID against order name -> taps **Confirm Release**.
-* **Exception Flow (Double Claim):** Order already marked `CLAIMED` -> system displays prominent red blocking warning with original release timestamp and releasing officer name.
-* **Postcondition:** Order marked `CLAIMED` via atomic update (`UPDATE orders SET status = 'CLAIMED' ...`) with immutable timestamp and officer attribution.
-* **Related Requirements:** `REQ-36` to `REQ-40`, `REQ-48`
+* **Main Flow:** Officer asks for Pick-up Code -> types code into auto-focused search bar -> bundle loads with per-line item specs, customization details, per-line claim state, and verified payment badge -> officer checks physical university/government ID against order name -> selects unclaimed lines/full quantities to release now -> taps **Confirm Release (selected lines)**.
+* **Exception Flow (Double Claim):** Line already `CLAIMED` (or qty already fully claimed) -> system displays prominent red blocking warning with original release timestamp and releasing officer name; that line is skipped, other selected lines still releasable.
+* **Postcondition:** Released lines marked `CLAIMED` with `claimed_at/by` + `quantity_claimed`; order becomes `PARTIALLY_CLAIMED` or `CLAIMED` (all lines fully claimed) via atomic `confirm_order_pickup(code, officer, item_ids[])` with immutable timestamps and officer attribution.
+* **Related Requirements:** `REQ-36` to `REQ-40`, `REQ-39A`, `REQ-48`
 
 ---
 
@@ -292,23 +298,23 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 | REQ-07 | Restrict structural variant deletion on campaigns with active orders | Campaign Mgmt | UC-02 | Must |
 | REQ-08 | Display discovery feed with real-time countdowns and MOQ progress indicators | Ordering | UC-03 | Must |
 | REQ-08A | Support passwordless buyer authentication via emailed magic link | Ordering | UC-03A | Must |
-| REQ-09 | Provide variant selectors and text inputs for personalization | Ordering | UC-03 | Must |
-| REQ-10 | Disable cart addition for sold-out Flash drop variants | Ordering | UC-03 | Must |
-| REQ-11 | Decrement Flash inventory atomically at order placement with reservation TTL (digital 30m only); restore reserved quantity on cancel; officer flash-cash decrements atomically inside `create_cash_order()`; preorder cash has no stock op | Ordering | UC-03, UC-04, UC-07 | Must |
-| REQ-12 | Capture buyer source wallet/bank channel, reference number, and receipt screenshot (digital checkout only) | Ordering | UC-04 | Must |
+| REQ-09 | Provide variant grid + detail sheet with selectors and text inputs for personalization; per-line qty; Add to Cart (local-only guest cart, D-10/D-11) | Ordering | UC-03 | Must |
+| REQ-10 | Disable cart addition for sold-out/inactive Flash drop variants; cart scoped to single campaign (switching campaigns uses separate cart with warning) | Ordering | UC-03 | Must |
+| REQ-11 | Reserve whole bundle atomically at Purchase with reservation TTL (digital 30m per order only); lock variants `FOR UPDATE ORDER BY id`; restore each line qty exactly once on cancel/expiry; officer multi-line flash-cash decrements atomically inside `create_cash_order(p_lines)`; preorder cash has no stock op | Ordering | UC-03, UC-04, UC-07 | Must |
+| REQ-12 | Capture single buyer source wallet/bank channel, reference number, and receipt screenshot per bundle order (digital checkout only) | Ordering | UC-04 | Must |
 | REQ-13 | ~~Allow Cash-on-Hand order reservation with configurable payment instructions~~ — RETIRED in v2.9 (D-06). Buyer cash reservation path removed; see REQ-13B/REQ-21/REQ-22. | Ordering | UC-04 | — |
 | REQ-13B | Forbid buyer-created `CASH_ON_HAND` orders; cash creatable only via officer `create_cash_order()` under `OPEN` same-org register session | Ordering / Anti-Fraud | UC-07 | Must |
 | REQ-14 | Enforce database-level uniqueness constraint on payment reference numbers across all tenants (cash `NULL` exempt) | Ordering / Anti-Fraud | UC-04, UC-15 | Must |
-| REQ-16 | Enforce per-buyer purchase limits server-side across orders | Ordering | UC-04, UC-07 | Should |
-| REQ-17 | Provide real-time buyer order status timeline, item details, and permanent receipt view (cash starts at `Payment Verified`) | Ordering | UC-05 | Must |
-| REQ-17A | Allow buyers to resubmit corrected payment details on rejected digital orders without duplicate order creation (digital only) | Ordering | UC-05 | Must |
+| REQ-16 | Enforce per-buyer purchase limits server-side across orders: per-variant cap + per-campaign total cap, applied to digital bundles and multi-line cash | Ordering | UC-04, UC-07 | Should |
+| REQ-17 | Provide real-time buyer order status timeline, per-line claim state, item details, and permanent receipt view (cash starts at `Payment Verified`) | Ordering | UC-05 | Must |
+| REQ-17A | Allow buyers to resubmit corrected payment details on rejected digital bundles without duplicate order creation (same order_id, lines retained; digital only) | Ordering | UC-05 | Must |
 | REQ-18 | Display triage queue of pending payments showing receipt screenshot, amount, source, and reference | Verification | UC-06 | Must |
 | REQ-19 | Allow officers to Approve or Reject payments with mandatory rejection reason notes | Verification | UC-06 | Must |
 | REQ-20 | Record immutable audit log entries for all status changes with actor ID and timestamp | Verification | UC-06 | Must |
-| REQ-21 | Allow officers to create-and-verify F2F cash orders directly as `PAYMENT_VERIFIED` under an `OPEN` register session (no buyer reservation) | Verification | UC-07 | Must |
-| REQ-22 | Provide unified officer cash terminal for walk-in cash buyers (find-or-create buyer + order + verify in one transaction, with preorder/flash branching) | Verification | UC-07 | Must |
+| REQ-21 | Allow officers to create-and-verify multi-line F2F cash bundles directly as `PAYMENT_VERIFIED` under an `OPEN` register session (no buyer reservation; single cash tender per bundle) | Verification | UC-07 | Must |
+| REQ-22 | Provide unified officer cash terminal for walk-in cash buyers (multi-line bundle + find-or-create buyer + order + verify in one transaction, with preorder/flash branching) | Verification | UC-07 | Must |
 | REQ-22A | Require buyer email on officer cash entry; send magic-link tracker + claim-pass link via Google SMTP (retry without rolling back order) | Verification | UC-07, UC-05 | Must |
-| REQ-23 | Automatically evaluate campaign MOQ against verified orders at deadline | MOQ Safeguard | UC-08 | Must |
+| REQ-23 | Automatically evaluate campaign MOQ against verified units (`SUM(order_items.quantity)`) at deadline | MOQ Safeguard | UC-08 | Must |
 | REQ-24 | Auto-transition campaign to `CLOSED_PENDING_PRODUCTION` when MOQ target is met | MOQ Safeguard | UC-08 | Must |
 | REQ-25 | Auto-transition campaign to `MOQ_FAILED` with 48-hour grace window when MOQ is missed | MOQ Safeguard | UC-08 | Must |
 | REQ-26 | Restrict "Proceed Anyway (Cover Deficit)" action exclusively to Org Treasurer role | MOQ Safeguard | UC-08 | Must |
@@ -319,13 +325,15 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 | REQ-31 | Automatically unlock Master Supplier Export for campaign upon fee clearance | Toll-Gate | UC-10 | Must |
 | REQ-32 | Generate consolidated supplier export grouping garment cuts, sizes, and print specs | Toll-Gate | UC-11 | Must |
 | REQ-33 | Sanitize all free-text fields in exports to neutralize spreadsheet formula injection | Toll-Gate | UC-11 | Must |
-| REQ-34 | Render ticket-style claim pass with short alphanumeric Pick-up Code (e.g., `CS-8419`) | Distribution | UC-12 | Must |
+| REQ-34 | Render ticket-style claim pass with single short alphanumeric Pick-up Code per bundle (e.g., `CS-8419`) + per-line claim state | Distribution | UC-12 | Must |
+| REQ-34A | Display per-line Ready / Claimed x/y state on bundle claim pass and tracker | Distribution | UC-12, UC-05 | Must |
 | REQ-35 | Support client-side image saving of claim pass for offline presentation | Distribution | UC-12 | Must |
 | REQ-36 | Provide auto-focused search field for instant Pick-up Code query at booth terminal | Distribution | UC-13 | Must |
-| REQ-37 | Display order details, customization specs, and payment status on lookup | Distribution | UC-13 | Must |
-| REQ-38 | Prompt officer to verify buyer physical university/national ID prior to release | Distribution | UC-13 | Must |
-| REQ-39 | Prevent double-claiming with atomic update and persistent blocking warning | Distribution | UC-13 | Must |
-| REQ-40 | Record releasing officer ID and timestamp on claim confirmation | Distribution | UC-13 | Must |
+| REQ-37 | Display bundle details, per-line customization specs, per-line claim state, and payment status on lookup | Distribution | UC-13 | Must |
+| REQ-38 | Prompt officer to verify buyer physical university/national ID prior to release (once per visit) | Distribution | UC-13 | Must |
+| REQ-39 | Prevent double-claiming with atomic per-line update and persistent blocking warning | Distribution | UC-13 | Must |
+| REQ-39A | Support partial pickup: release selected lines/qtys now (`PARTIALLY_CLAIMED`); `CLAIMED` only when all lines fully claimed | Distribution | UC-13 | Must |
+| REQ-40 | Record releasing officer ID and timestamp per line + order on claim confirmation | Distribution | UC-13 | Must |
 | REQ-41 | Tag officer-created cash orders at creation with active Daily Register Session ID and collecting officer ID (`verified_by_officer_id` = collector) | Anti-Fraud | UC-14, UC-07 | Must |
 | REQ-42 | Automatically calculate total expected shift cash based on verified transactions | Anti-Fraud | UC-14 | Must |
 | REQ-43 | Require dual-officer sign-off for register closure; require explanatory note for cash variances (`CLOSED_WITH_DISCREPANCY`) without halting operations | Anti-Fraud | UC-14 | Must |
@@ -341,7 +349,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 ## 5. External Interface Requirements
 
 ### 5.1 User Interfaces
-* **Buyer UI:** Mobile-first responsive web application (TailwindCSS). Includes campaign discovery feed, multi-step variant selection, digital-only checkout with wallet source selector, permanent order tracking timeline, receipt locker, and offline-downloadable claim ticket. No cash option in buyer checkout (D-06).
+* **Buyer UI:** Mobile-first responsive web application (TailwindCSS). Includes campaign discovery feed, variant grid + detail sheet, guest cart drawer (localStorage per campaign), bundle digital-only checkout with wallet source selector + single proof per bundle, permanent order tracking timeline with per-line status, receipt locker, and offline-downloadable claim ticket. No cash option in buyer checkout (D-06).
 * **Org Merchant Portal:** Responsive desktop and tablet dashboard. Includes Drop Builder, Verification Desk, officer-only F2F Cash Terminal (unified preorder/flash form, D-06), Daily Register manager, fast-lookup booth dispatch terminal, and gated Production Hub.
 * **Superadmin UI:** Administrative web portal for vetting organizations, verifying fee payments, and reviewing platform metrics.
 
@@ -380,8 +388,8 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 | `Buyer` | `id`, `name`, `email`, `mobile_number`, `created_at` | Passwordless identity for purchase caps and order tracking |
 | `Campaign` | `id`, `org_id`, `type` (`PRE_ORDER`, `FLASH`), `status`, `moq_target`, `deadline_at`, `fee_policy_version`, `fee_status`, `require_student_id` | Central campaign coordinator and lifecycle machine |
 | `ProductVariant` | `id`, `campaign_id`, `sku`, `attributes` (size/color), `price`, `stock_remaining`, `variant_purchase_cap` | Defines purchasable options and tracks inventory |
-| `Order` | `id`, `campaign_id`, `buyer_id`, `status`, `total_amount`, `payment_method`, `source_channel`, `payment_reference`, `receipt_image_url`, `pickup_code`, `reservation_expires_at`, `claimed_at`, `claimed_by_officer_id` | Core transactional record. Persists permanently to allow customer and merchant self-auditing |
-| `OrderItem` | `id`, `order_id`, `variant_id`, `customization_data` (printed name/number) | Granular line items and custom personalization specs |
+| `Order` | `id`, `campaign_id`, `buyer_id`, `status` (incl. `PARTIALLY_CLAIMED`), `total_amount = Σ line totals (server-computed)`, `payment_method`, `source_channel` (single per bundle), `payment_reference` (single per bundle, UNIQUE), `receipt_image_url` (single per bundle), `pickup_code` (single per bundle, UNIQUE), `reservation_expires_at` (single per bundle), `claimed_at`, `claimed_by_officer_id` | Core transactional record (bundle header). Persists permanently to allow customer and merchant self-auditing |
+| `OrderItem` | `id`, `order_id`, `variant_id`, `unit_price` (frozen), `quantity`, `quantity_claimed`, `status` (`READY_FOR_PICKUP`/`CLAIMED`), `customization_data` (printed name/number), `claimed_at`, `claimed_by_officer_id` | Granular bundle lines with per-line partial-claim tracking |
 | `OrderStatusHistory` | `id`, `order_id`, `from_status`, `to_status`, `actor_id`, `notes`, `occurred_at` | Immutable chronological audit trail |
 | `RegisterSession` | `id`, `org_id`, `session_name`, `opened_by_officer_id`, `closed_by_officer_id`, `cosigned_by_officer_id`, `status` (`OPEN`, `CLOSED_BALANCED`, `CLOSED_WITH_DISCREPANCY`), `expected_cash`, `counted_cash`, `variance_note` | Supports flexible daily cash drawer tracking and reconciliation |
 | `Refund` | `id`, `order_id`, `refund_method`, `refund_reference`, `proof_url`, `processed_by_officer_id` | Tracks refund fulfillment on cancelled campaigns |
@@ -423,3 +431,5 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 14. **Cash Skips AWAITING_PAYMENT (D-07):** Resolved 2026-10-01 — Officer cash orders are created directly as `PAYMENT_VERIFIED` with `pickup_code` issued at creation. No TTL, no `AWAITING_PAYMENT`, no rejection/resubmission for cash. Preorder cash counts to MOQ immediately; flash cash decrements stock atomically in the same transaction.
 15. **Cash Creation Guardrails (D-08):** Resolved 2026-10-01 — `CASH_ON_HAND` enum retained for audit clarity but buyer `INSERT` denied via RLS; only `create_cash_order()` (officer roles `CASHIER`/`TREASURER`/`VOLUNTEER`, same-org, `OPEN` session) may create cash orders. `verified_by_officer_id` is defined as the collecting officer. Email send failure retries out-of-band and never rolls back the verified sale.
 16. **Unified Cash Form (D-09):** Resolved 2026-10-01 — One officer Cash Terminal handles both `PRE_ORDER` (no stock op) and `FLASH` (atomic decrement + cap check) via branching. Booth `payment_instructions` render in officer header only.
+17. **Campaign-Scoped Bundle Cart (D-10):** Resolved 2026-10-01 — 1 cart = 1 campaign = 1 order = 1 proof/ref/code. `Add to Cart` is local-only (no reservation); `Purchase` reserves all lines atomically (`FOR UPDATE ORDER BY id`, max 10 lines / 99 units). One 30-min TTL per bundle; expiry restores each line qty once. MOQ counts units (`SUM qty`); fee uses per-line breakdown. Cross-campaign/cross-org bundles rejected.
+18. **Guest Cart + Partial Pickup (D-11):** Resolved 2026-10-01 — Guests build cart in `localStorage["ebisu:cart:{campaign_id}"]`; auth (magic link) only at Purchase; server re-validates prices/caps/stock. Dispatch supports partial pickup: `order_items` carry `status/quantity_claimed/claimed_at/by`; order is `PARTIALLY_CLAIMED` until all lines fully claimed. Officer cash also multi-line (`p_lines JSONB`) under same guards.
