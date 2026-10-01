@@ -1,7 +1,7 @@
 # Software Requirements Specification (SRS)
 ## Project Ebisu — Campus Merch Platform
 
-**Document Status:** v2.10 — Canonical Engineering Reference (D-10 campaign-scoped cart + D-11 guest cart/partial-pickup approved 2026-10-01, builds on D-06 officer-only cash 2026-10-01, D-05 stack reconciliation 2026-09-30)  
+**Document Status:** v2.11 — Canonical Engineering Reference (D-12 rejected-terminal/reorder + D-13 ref normalization/blocking Option A + D-14 /track portal counterpart + D-15 unit-level partial pickup approved 2026-10-01, builds on v2.10 D-10/D-11)  
 **Prepared For:** Full-Stack Engineering Team  
 
 ---
@@ -144,15 +144,15 @@ Multi-tenant commerce application where each accredited Org operates as an indep
   1. Buyer clicks **Checkout / Purchase** -> server runs atomic `reserve_cart()` in one transaction: locks all variants `FOR UPDATE ORDER BY id`, validates same-campaign/same-org, `is_active`, FLASH stock sufficiency, per-variant + per-campaign purchase caps, freezes `unit_price` from catalog, computes `total_amount = Σ unit_price × qty`, `INSERT orders + N order_items`, starts single 30-min TTL -> `PAYMENT_SUBMITTED` hold. Any line fails -> whole bundle rolls back.
   2. *Digital Wallet / Bank Transfer:* Buyer selects `Source Channel` (GCash, Maya, GoTyme, BDO, BPI, Other) -> inputs single transaction reference number / InstaPay Trace ID for the bundle total -> uploads receipt screenshot -> submits -> `PAYMENT_SUBMITTED`.
   - *Cash on Hand:* Not offered in buyer UI. Buyers paying cash transact F2F at the booth; the officer creates the multi-line order via UC-07. Any legacy `AWAITING_PAYMENT` cash-reservation path is retired.
-* **Exception Flow (Duplicate Reference):** Reference number already exists in database across any campaign -> entry rejected immediately (`REQ-14`; cash `NULL` references exempt). One reference covers the whole bundle.
+* **Exception Flow (Duplicate Reference — D-13):** Reference number is normalized (`UPPER(TRIM())`, spaces/dashes stripped) then checked against the global unique index across any campaign -> entry rejected immediately (`REQ-14`; cash `NULL` references exempt). One reference covers the whole bundle. Rejected-order references stay blocked (never freed, Option A); cancelled/expired-order references are freed after 24h by job; typo-squat release is Treasurer/Superadmin-only with audit note.
 * **Exception Flow (TTL Expiry):** Payment proof not submitted within 30 minutes -> bundle auto-cancels and each line's reserved quantity restores exactly once (conditional on prior status, quantity-aware).
 * **Related Requirements:** `REQ-11`, `REQ-12` to `REQ-14`, `REQ-16`, `REQ-13B`
 
-#### **UC-05: Track Order, View Receipts & Resubmit Payment**
+#### **UC-05: Track Orders, View Receipts & Reorder After Rejection (D-12/D-14)**
 * **Actor:** Buyer
-* **Precondition:** Buyer authenticated via magic link.
-* **Main Flow:** Buyer views permanent purchase history and real-time order status (digital: `Awaiting Payment` -> `Payment Verified` -> `In Production` -> `Ready for Pick-up` -> `Partially Claimed` -> `Claimed`; officer-entered cash starts at `Payment Verified` — D-06) with per-line status dots, along with uploaded receipt (digital, single proof per bundle) and full line-item breakdowns.
-* **Alternate Flow (Resubmission, digital only):** If a digital order is flagged `REJECTED`, buyer reviews the officer's rejection note, edits reference number/channel, uploads new proof, and resubmits without losing the reserved bundle (same `order_id`, lines retained). Cash orders have no rejection/resubmission path.
+* **Precondition:** Buyer authenticated via magic link. Orders are unified by buyer email (`buyers.email UNIQUE` → `auth_user_id`).
+* **Main Flow:** Buyer enters email at `/track` -> receives magic link -> redirected to `/orders` list (Current: `PAYMENT_SUBMITTED`/`PAYMENT_VERIFIED`/`IN_PRODUCTION`/`READY_FOR_PICKUP`/`PARTIALLY_CLAIMED`; Past: `CLAIMED`/`REJECTED`/`CANCELLED`/`REFUNDED`) -> opens `/orders/[id]` for permanent timeline (digital: `Awaiting Payment` -> `Payment Verified` -> `In Production` -> `Ready for Pick-up` -> `Partially Claimed` -> `Claimed`; officer-entered cash starts at `Payment Verified` — D-06) with per-line `Claimed x/y` dots, single receipt view (digital, single proof per bundle) and full line-item breakdowns. Per-order magic-link emails (purchase receipt, verification, ready-for-pickup, cash tracker — REQ-22A) remain in place as counterparts: each embeds a fresh link to the same account's `/orders/[id]`.
+* **Alternate Flow (Rejection is terminal, digital only — D-12):** If a digital order is flagged `REJECTED`, it is terminal. System immediately releases each line's reserved qty exactly once (FLASH `stock_remaining += quantity`, conditional on prior `PAYMENT_SUBMITTED`), notifies buyer with the officer's rejection note, and offers **Reorder same items** (rebuilds `localStorage["ebisu:cart:{campaign_id}"]` from prior lines as a new cart; buyer runs a fresh `reserve_cart()` with new `order_id`, new TTL, fresh price/cap/stock checks). No same-`order_id` resubmission. Cash orders have no rejection path.
 * **Related Requirements:** `REQ-17`, `REQ-17A`
 
 ---
@@ -227,15 +227,15 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-12: Access Digital Claim Pass**
 * **Actor:** Buyer
 * **Precondition:** Order is `PAYMENT_VERIFIED` and campaign is `READY_FOR_PICKUP`.
-* **Main Flow:** Buyer opens Order Tracker -> displays high-contrast digital claim pass featuring single alphanumeric Pick-up Code (e.g., `CS-8419`) for the whole bundle, per-line variant specs with per-line claim state (`Ready` / `Claimed x/y`), and buyer name -> taps **Save to Gallery** for offline presentation.
+* **Main Flow:** Buyer opens Order Tracker -> displays high-contrast digital claim pass featuring single alphanumeric Pick-up Code (e.g., `CS-8419`) for the whole bundle, per-line variant specs with per-line `Claimed x/y` qty state, and buyer name -> taps **Save to Gallery** for offline presentation.
 * **Related Requirements:** `REQ-34`, `REQ-35`, `REQ-34A`
 
-#### **UC-13: Dispatch Merchandise at Booth (Online Terminal, Partial Pickup — D-11)**
+#### **UC-13: Dispatch Merchandise at Booth (Online Terminal, Unit-Level Partial Pickup — D-15)**
 * **Actor:** Org Officer
 * **Precondition:** Campaign is `READY_FOR_PICKUP`; officer terminal has active internet connectivity.
-* **Main Flow:** Officer asks for Pick-up Code -> types code into auto-focused search bar -> bundle loads with per-line item specs, customization details, per-line claim state, and verified payment badge -> officer checks physical university/government ID against order name -> selects unclaimed lines/full quantities to release now -> taps **Confirm Release (selected lines)**.
-* **Exception Flow (Double Claim):** Line already `CLAIMED` (or qty already fully claimed) -> system displays prominent red blocking warning with original release timestamp and releasing officer name; that line is skipped, other selected lines still releasable.
-* **Postcondition:** Released lines marked `CLAIMED` with `claimed_at/by` + `quantity_claimed`; order becomes `PARTIALLY_CLAIMED` or `CLAIMED` (all lines fully claimed) via atomic `confirm_order_pickup(code, officer, item_ids[])` with immutable timestamps and officer attribution.
+* **Main Flow:** Officer asks for Pick-up Code -> types code into auto-focused search bar -> bundle loads with per-line item specs, customization details, per-line `Claimed x/y` state, and verified payment badge -> officer checks physical university/government ID against order name -> enters claim qty per line (1..remaining, whole-line allowed) -> taps **Confirm Release (selected qtys)**.
+* **Exception Flow (Double Claim):** Line qty already `CLAIMED` (or requested qty exceeds remaining) -> system displays prominent red blocking warning with original release timestamp and releasing officer name; that qty is skipped, other selected qtys still releasable.
+* **Postcondition:** Released qtys increment `quantity_claimed` with `claimed_at/by` per line (+ per-claim audit row); line flips `CLAIMED` only when `quantity_claimed = quantity`; order becomes `PARTIALLY_CLAIMED` or `CLAIMED` (all lines fully claimed) via atomic `confirm_order_pickup(code, officer, p_claims JSONB [{item_id, qty}])` with immutable timestamps and officer attribution.
 * **Related Requirements:** `REQ-36` to `REQ-40`, `REQ-39A`, `REQ-48`
 
 ---
@@ -255,7 +255,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 #### **UC-15: Cross-Platform Payment Reference Deduplication**
 * **Actor:** System (automated)
 * **Precondition:** Reference number submitted at checkout.
-* **Main Flow:** System checks reference string against the unique index across all campaigns and orgs -> rejects duplicate submission immediately.
+* **Main Flow:** System normalizes reference string (`UPPER(TRIM())`, strip spaces/dashes) then checks against the unique index across all campaigns and orgs -> rejects duplicate submission immediately. `REJECTED` refs stay blocked; `CANCELLED` refs freed after 24h.
 * **Related Requirements:** `REQ-14`
 
 ---
@@ -304,10 +304,10 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 | REQ-12 | Capture single buyer source wallet/bank channel, reference number, and receipt screenshot per bundle order (digital checkout only) | Ordering | UC-04 | Must |
 | REQ-13 | ~~Allow Cash-on-Hand order reservation with configurable payment instructions~~ — RETIRED in v2.9 (D-06). Buyer cash reservation path removed; see REQ-13B/REQ-21/REQ-22. | Ordering | UC-04 | — |
 | REQ-13B | Forbid buyer-created `CASH_ON_HAND` orders; cash creatable only via officer `create_cash_order()` under `OPEN` same-org register session | Ordering / Anti-Fraud | UC-07 | Must |
-| REQ-14 | Enforce database-level uniqueness constraint on payment reference numbers across all tenants (cash `NULL` exempt) | Ordering / Anti-Fraud | UC-04, UC-15 | Must |
+| REQ-14 | Enforce database-level uniqueness on normalized payment reference numbers (`UPPER(TRIM())`, spaces/dashes stripped) across all tenants (cash `NULL` exempt; `REJECTED` refs never freed — Option A; `CANCELLED` refs freed after 24h; admin-only typo release) | Ordering / Anti-Fraud | UC-04, UC-15 | Must |
 | REQ-16 | Enforce per-buyer purchase limits server-side across orders: per-variant cap + per-campaign total cap, applied to digital bundles and multi-line cash | Ordering | UC-04, UC-07 | Should |
-| REQ-17 | Provide real-time buyer order status timeline, per-line claim state, item details, and permanent receipt view (cash starts at `Payment Verified`) | Ordering | UC-05 | Must |
-| REQ-17A | Allow buyers to resubmit corrected payment details on rejected digital bundles without duplicate order creation (same order_id, lines retained; digital only) | Ordering | UC-05 | Must |
+| REQ-17 | Provide buyer portal (`/track` email-link login → `/orders` Current/Past list → `/orders/[id]` timeline) with real-time order status, per-line `Claimed x/y` state, item details, and permanent receipt view (cash starts at `Payment Verified`); per-order magic-link emails retained as counterparts | Ordering | UC-05 | Must |
+| REQ-17A | Rejected digital bundles are terminal (D-12): notify buyer with reason, release reserved stock immediately, offer reorder as new order (no same-`order_id` resubmission; single mutable proof slot retained — Option A) | Ordering | UC-05 | Must |
 | REQ-18 | Display triage queue of pending payments showing receipt screenshot, amount, source, and reference | Verification | UC-06 | Must |
 | REQ-19 | Allow officers to Approve or Reject payments with mandatory rejection reason notes | Verification | UC-06 | Must |
 | REQ-20 | Record immutable audit log entries for all status changes with actor ID and timestamp | Verification | UC-06 | Must |
@@ -331,8 +331,8 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 | REQ-36 | Provide auto-focused search field for instant Pick-up Code query at booth terminal | Distribution | UC-13 | Must |
 | REQ-37 | Display bundle details, per-line customization specs, per-line claim state, and payment status on lookup | Distribution | UC-13 | Must |
 | REQ-38 | Prompt officer to verify buyer physical university/national ID prior to release (once per visit) | Distribution | UC-13 | Must |
-| REQ-39 | Prevent double-claiming with atomic per-line update and persistent blocking warning | Distribution | UC-13 | Must |
-| REQ-39A | Support partial pickup: release selected lines/qtys now (`PARTIALLY_CLAIMED`); `CLAIMED` only when all lines fully claimed | Distribution | UC-13 | Must |
+| REQ-39 | Prevent double-claiming with atomic per-qty update and persistent blocking warning | Distribution | UC-13 | Must |
+| REQ-39A | Support unit-level partial pickup: release selected qtys per line (`quantity_claimed += qty`, D-15); `CLAIMED` line/order only when fully claimed | Distribution | UC-13 | Must |
 | REQ-40 | Record releasing officer ID and timestamp per line + order on claim confirmation | Distribution | UC-13 | Must |
 | REQ-41 | Tag officer-created cash orders at creation with active Daily Register Session ID and collecting officer ID (`verified_by_officer_id` = collector) | Anti-Fraud | UC-14, UC-07 | Must |
 | REQ-42 | Automatically calculate total expected shift cash based on verified transactions | Anti-Fraud | UC-14 | Must |
@@ -349,7 +349,7 @@ Multi-tenant commerce application where each accredited Org operates as an indep
 ## 5. External Interface Requirements
 
 ### 5.1 User Interfaces
-* **Buyer UI:** Mobile-first responsive web application (TailwindCSS). Includes campaign discovery feed, variant grid + detail sheet, guest cart drawer (localStorage per campaign), bundle digital-only checkout with wallet source selector + single proof per bundle, permanent order tracking timeline with per-line status, receipt locker, and offline-downloadable claim ticket. No cash option in buyer checkout (D-06).
+* **Buyer UI:** Mobile-first responsive web application (TailwindCSS). Includes campaign discovery feed, variant grid + detail sheet, guest cart drawer (localStorage per campaign), bundle digital-only checkout with wallet source selector + single proof per bundle, buyer portal (`/track` magic-link login → `/orders` Current/Past → `/orders/[id]` timeline with per-line `Claimed x/y`), receipt locker, and offline-downloadable claim ticket. Per-order magic-link emails retained as counterparts. No cash option in buyer checkout (D-06). No buyer passwords — pure magic-link (D-14).
 * **Org Merchant Portal:** Responsive desktop and tablet dashboard. Includes Drop Builder, Verification Desk, officer-only F2F Cash Terminal (unified preorder/flash form, D-06), Daily Register manager, fast-lookup booth dispatch terminal, and gated Production Hub.
 * **Superadmin UI:** Administrative web portal for vetting organizations, verifying fee payments, and reviewing platform metrics.
 
@@ -389,7 +389,7 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 | `Campaign` | `id`, `org_id`, `type` (`PRE_ORDER`, `FLASH`), `status`, `moq_target`, `deadline_at`, `fee_policy_version`, `fee_status`, `require_student_id` | Central campaign coordinator and lifecycle machine |
 | `ProductVariant` | `id`, `campaign_id`, `sku`, `attributes` (size/color), `price`, `stock_remaining`, `variant_purchase_cap` | Defines purchasable options and tracks inventory |
 | `Order` | `id`, `campaign_id`, `buyer_id`, `status` (incl. `PARTIALLY_CLAIMED`), `total_amount = Σ line totals (server-computed)`, `payment_method`, `source_channel` (single per bundle), `payment_reference` (single per bundle, UNIQUE), `receipt_image_url` (single per bundle), `pickup_code` (single per bundle, UNIQUE), `reservation_expires_at` (single per bundle), `claimed_at`, `claimed_by_officer_id` | Core transactional record (bundle header). Persists permanently to allow customer and merchant self-auditing |
-| `OrderItem` | `id`, `order_id`, `variant_id`, `unit_price` (frozen), `quantity`, `quantity_claimed`, `status` (`READY_FOR_PICKUP`/`CLAIMED`), `customization_data` (printed name/number), `claimed_at`, `claimed_by_officer_id` | Granular bundle lines with per-line partial-claim tracking |
+| `OrderItem` | `id`, `order_id`, `variant_id`, `unit_price` (frozen), `quantity`, `quantity_claimed`, `status` (`READY_FOR_PICKUP`/`CLAIMED`), `customization_data` (printed name/number), `claimed_at`, `claimed_by_officer_id` | Granular bundle lines with unit-level partial-claim tracking (`quantity_claimed += qty`, D-15) |
 | `OrderStatusHistory` | `id`, `order_id`, `from_status`, `to_status`, `actor_id`, `notes`, `occurred_at` | Immutable chronological audit trail |
 | `RegisterSession` | `id`, `org_id`, `session_name`, `opened_by_officer_id`, `closed_by_officer_id`, `cosigned_by_officer_id`, `status` (`OPEN`, `CLOSED_BALANCED`, `CLOSED_WITH_DISCREPANCY`), `expected_cash`, `counted_cash`, `variance_note` | Supports flexible daily cash drawer tracking and reconciliation |
 | `Refund` | `id`, `order_id`, `refund_method`, `refund_reference`, `proof_url`, `processed_by_officer_id` | Tracks refund fulfillment on cancelled campaigns |
@@ -418,7 +418,7 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 1. **Cross-Wallet / InstaPay References:** Resolved — Buyer selects `Source Channel` at checkout. Reference number string remains strictly unique across the platform to prevent duplicate slip submissions. The Verification Desk presents screenshots, timestamps, amounts, and source channels so treasurers verify via transaction logs.
 2. **Register Sessions vs. Rigid Shifts:** Resolved — Decoupled cash drawer tracking from individual volunteer shifts. Orgs open a Daily Register Session per booth. Rotating volunteers process cash transactions tagged with their individual officer IDs under the active session. Cash counting and dual sign-off occur once at the end of the day.
 3. **General Buyer Model:** Resolved — Core identity captures Name, Email (magic link), and Mobile Number. Student ID is an optional campaign-level toggle configured by the org depending on drop restrictions.
-4. **Inventory Concurrency & Reservation TTL:** Resolved, amended by D-06/D-07 — Stock decrements atomically at digital checkout submission to prevent overselling. Digital orders have a 30-min Reservation TTL. Cash orders skip reservation/TTL and are created directly as `PAYMENT_VERIFIED` by officers. Unpaid digital orders auto-cancel, restoring reserved quantity. Rejected digital orders follow UC-05 resubmission (retains hold per F02 remediation); cash has no rejection path.
+4. **Inventory Concurrency & Reservation TTL:** Resolved, amended by D-06/D-07 and superseded in part by D-12 — Stock decrements atomically at digital checkout submission to prevent overselling. Digital orders have a 30-min Reservation TTL. Cash orders skip reservation/TTL and are created directly as `PAYMENT_VERIFIED` by officers. Unpaid digital orders auto-cancel, restoring reserved quantity. Rejected digital orders are terminal and release stock immediately; buyer must reorder as a new order (D-12); cash has no rejection path.
 5. **Platform Toll-Gate Economics & Low-Ticket Cap:** Superseded by D-04 (Item 11) on 2026-09-21 — Former volume-scaled model (`min(₱5.00, 5%)`) is no longer in effect. Retained here for history only.
 11. **Banded Platform Fee with Campaign Minimum (D-04):** Resolved 2026-09-21 (per `docs/moms/2026-09-21-platform-pricing-approval.md`) — Per-unit fee by retail band: 5% for items under ₱100 (rounded to centavo); flat ₱5 (₱100–₱499), ₱10 (₱500–₱999), ₱15 (₱1,000+). Campaign total is `max(₱100, Σ unit fee × verified quantity)`. The toll-gate locks the consolidated Master Supplier Export and aggregated tailor sizing matrix.
 6. **Cash Discrepancy Protocol:** Resolved — Variances mandate an explanatory note and dual-officer digital sign-off (`CLOSED_WITH_DISCREPANCY`). Administrative resolutions remain internal to the organization, avoiding booth halts.
@@ -433,3 +433,7 @@ Secure HTTPS web communication with JSON payloads. Polling or lightweight real-t
 16. **Unified Cash Form (D-09):** Resolved 2026-10-01 — One officer Cash Terminal handles both `PRE_ORDER` (no stock op) and `FLASH` (atomic decrement + cap check) via branching. Booth `payment_instructions` render in officer header only.
 17. **Campaign-Scoped Bundle Cart (D-10):** Resolved 2026-10-01 — 1 cart = 1 campaign = 1 order = 1 proof/ref/code. `Add to Cart` is local-only (no reservation); `Purchase` reserves all lines atomically (`FOR UPDATE ORDER BY id`, max 10 lines / 99 units). One 30-min TTL per bundle; expiry restores each line qty once. MOQ counts units (`SUM qty`); fee uses per-line breakdown. Cross-campaign/cross-org bundles rejected.
 18. **Guest Cart + Partial Pickup (D-11):** Resolved 2026-10-01 — Guests build cart in `localStorage["ebisu:cart:{campaign_id}"]`; auth (magic link) only at Purchase; server re-validates prices/caps/stock. Dispatch supports partial pickup: `order_items` carry `status/quantity_claimed/claimed_at/by`; order is `PARTIALLY_CLAIMED` until all lines fully claimed. Officer cash also multi-line (`p_lines JSONB`) under same guards.
+19. **Rejected-Terminal + Reorder (D-12):** Resolved 2026-10-01 — `REJECTED` is terminal (no same-`order_id` resubmission; retires old REQ-17A resubmit). Rejection releases each line qty exactly once, notifies buyer with reason, offers Reorder-as-new-order with fresh `reserve_cart()` + TTL. Straightforward: no hold extension, no late-payment acceptance on rejected rows.
+20. **Reference Normalization + Blocking (D-13 / Option A):** Resolved 2026-10-01 — `payment_reference` normalized (`UPPER(TRIM())`, strip spaces/dashes) before global UNIQUE check. Single mutable proof slot retained (no `payment_attempts` table). `REJECTED` refs never freed; `CANCELLED`/expired refs freed after 24h; typo-squat release is Treasurer/Superadmin-only with audit note.
+21. **Buyer Portal Counterpart (D-14):** Resolved 2026-10-01 — No buyer passwords (password feature moot: orders unified by `buyers.email UNIQUE`). `/track` (email → magic link → `/orders` Current/Past list → `/orders/[id]`) is a counterpart to per-order magic-link emails (purchase/verify/ready/cash tracker), which remain in place. Each email embeds a fresh link to the same account.
+22. **Unit-Level Partial Pickup (D-15):** Resolved 2026-10-01 — Dispatch claims arbitrary qty per line (`quantity_claimed += qty`, `p_claims JSONB [{item_id, qty}]`); line `CLAIMED` only when fully claimed. Whole-line claim remains the `qty = remaining` case. Unit-level chosen over line-only for booth flexibility despite extra stepper/race handling.
