@@ -20,8 +20,7 @@ Every user must be signed in; there is no guest access.
 ```
 docs/
 ├── function-list.md        # V1 scope: roles, functions (EB-xxx), business rules
-├── design-spec.md          # UI notes (draft)
-└── moms/                   # Meeting notes
+└── design-spec.md          # UI notes (draft)
 ```
 
 The database schema lives in `supabase/migrations/` once coding starts.
@@ -48,13 +47,7 @@ To keep code, documentation, and task tracking strictly synchronized:
 2. **Project Board Tracking:**
    - Issues route automatically to the Organization Kanban Board (`To Do` -> `In Progress` -> `In Review` -> `Done`).
    - Tagged with custom fields for **Epic / Feature**, **Priority**, and **Estimate**.
-3. **Meeting Minutes (MoMs):**
-   - Meeting notes are recorded in `docs/moms/YYYY-MM-DD-<topic>.md`.
-   - Action items reference their tracked GitHub issues:
-     ```markdown
-     - [ ] @username to implement Supabase RLS policies for booth dispatch #12
-     ```
-4. **Automated PR Closure:**
+3. **Automated PR Closure:**
    - When submitting Pull Requests, reference the issue in the description:
      ```markdown
      Closes #12
