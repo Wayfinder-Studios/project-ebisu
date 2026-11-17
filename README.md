@@ -1,33 +1,30 @@
 # Project Ebisu
 
-> **Campus Merch Platform** — Multi-tenant e-commerce and operational logistics platform tailored for university student organizations, batch pre-orders, flash drops, and fast booth distribution.
+> **Campus Merch Platform** for student organizations at Visayas State University.
 
 ---
 
 ## Overview
 
-Project Ebisu addresses the specific operational frictions faced by university councils, student organizations, and campus merchants when running merchandise campaigns:
-- **Zero Platform Escrow:** Direct-to-merchant payments (GCash, Maya, Bank Transfer, Walk-in Cash) with proof verification desk.
-- **Batch Pre-Orders & MOQ Safeguards:** Enforce Minimum Order Quantities with automated deadlines, 48-hour Treasurer deficit override windows, and refund queues.
-- **Toll-Gate & Master Supplier Export:** Formula-sanitized tailor production spreadsheets unlocked upon platform fee settlement.
-- **Booth Dispatch Terminal:** Touchscreen-friendly, sub-second alphanumeric Pick-up Code lookups (`CS-8419`) with double-claim prevention.
-- **Daily Cash Registers:** Multi-officer cash drawer tracking with end-of-day dual-sign-off reconciliation.
+Ebisu lets student orgs sell merch without spreadsheets and chat threads:
+- **Inventory:** products with variants (size/color), stock or pre-order with deadline, plus staff-only MOQ tracking.
+- **Payment history:** every GCash/Maya/bank transfer and cash sale in one place, filterable and exportable.
+- **Buying:** buyers sign in with Google, browse all shops, check out with a transfer screenshot (or pay cash to staff), and pick up with a code at the booth.
+
+Every user must be signed in; there is no guest access.
 
 ---
 
-## Documentation Architecture
-
-All engineering specifications, database schemas, and meeting records live directly in this repository as the **single source of truth**:
+## Documentation
 
 ```
 docs/
-├── project-spec.md         # Complete Software Requirements Specification (SRS)
-├── database-schema.md      # PostgreSQL / Supabase schema, RLS policies & tables
-├── design-spec.md          # UI/UX design specifications & component guidelines
-└── moms/
-    ├── template.md         # Standard Minutes of Meeting markdown template
-    └── 2026-09-10-kickoff.md # Project kickoff meeting notes
+├── function-list.md        # V1 scope: roles, functions (EB-xxx), business rules
+├── design-spec.md          # UI notes (draft)
+└── moms/                   # Meeting notes
 ```
+
+The database schema lives in `supabase/migrations/` once coding starts.
 
 ---
 
@@ -36,8 +33,8 @@ docs/
 - **Frontend / Framework:** Next.js (App Router), TypeScript, TailwindCSS
 - **Hosting:** Vercel (Free Tier)
 - **Backend & Database:** Supabase (PostgreSQL with Row Level Security, Triggers & Atomic Functions)
-- **Object Storage:** Cloudflare R2 only (private: receipt screenshots, fee/refund proofs; public cacheable: org logos/banners, campaign covers/gallery — D-16)
-- **Transactional Notifications:** Supabase Auth sending via Google SMTP — direct sender for email magic links & status updates
+- **Auth:** Supabase Auth with Google OAuth only (every account starts as a Buyer)
+- **Storage:** Cloudflare R2 (private bucket for payment screenshots via presigned URLs, public bucket for product and shop images)
 
 ---
 
@@ -47,7 +44,7 @@ To keep code, documentation, and task tracking strictly synchronized:
 
 1. **Task Intake:**
    - Tasks and features are created via [GitHub Issue Forms](.github/ISSUE_TEMPLATE/task.yml).
-   - Every issue references the relevant SRS section (e.g., `Section 3.2 UC-03`).
+   - Every issue references the function ID it implements (e.g., `EB-007`).
 2. **Project Board Tracking:**
    - Issues route automatically to the Organization Kanban Board (`To Do` -> `In Progress` -> `In Review` -> `Done`).
    - Tagged with custom fields for **Epic / Feature**, **Priority**, and **Estimate**.
