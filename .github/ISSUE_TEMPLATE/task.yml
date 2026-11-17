@@ -1,49 +1,43 @@
 name: "Task / Feature"
-description: "Implement a feature from the SRS"
+description: "Implement a function from docs/function-list.md"
 labels: ["enhancement"]
 body:
   - type: dropdown
-    id: epic
+    id: area
     attributes:
-      label: Epic / Feature Area
-      description: "Select the high-level feature module from the architecture."
+      label: Area
       options:
-        - "Authentication & Identity"
-        - "Campaign Management"
-        - "Buyer Checkout & Reservation"
-        - "Payment Verification Desk"
-        - "MOQ Safeguards & Refunds"
-        - "Toll-Gate & Production Handoff"
-        - "Booth Dispatch Terminal"
-        - "Daily Cash Register"
-        - "Superadmin Governance"
+        - "Access & Account"
+        - "Browsing & Buying"
+        - "Products"
+        - "Orders & Payments"
+        - "Shop Administration"
+        - "Platform"
         - "Database & Infrastructure"
     validations:
       required: true
   - type: input
-    id: srs-reference
+    id: function-id
     attributes:
-      label: SRS Section Reference
-      description: "e.g., Section 3.2 UC-03 or docs/project-spec.md Section 1.4"
-      placeholder: "e.g., Section 3.2 UC-03"
+      label: Function ID
+      description: "From docs/function-list.md"
+      placeholder: "e.g., EB-007"
   - type: input
     id: estimate
     attributes:
       label: Estimate (Days)
-      description: "Estimated development effort in days (e.g., 1 day, 3 days, 0.5 days)."
       placeholder: "e.g., 2 days"
   - type: textarea
     id: description
     attributes:
       label: Description
-      description: "Detailed description of the task, implementation scope, and dependencies."
+      description: "What to build and anything not obvious from the function list."
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance Criteria
-      description: "Checklist of verifiable requirements for this task to be considered complete."
       value: "- [ ] \n- [ ] "
     validations:
       required: true

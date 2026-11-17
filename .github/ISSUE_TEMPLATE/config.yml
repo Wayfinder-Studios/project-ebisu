@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: "Engineering Documentation & SRS"
-    url: "https://github.com/Wayfinder-Labs/project-ebisu/tree/main/docs"
-    about: "Read the Software Requirements Specification (SRS) and architecture blueprints before creating tasks."
+  - name: "Function List"
+    url: "https://github.com/Wayfinder-Labs/project-ebisu/blob/main/docs/function-list.md"
+    about: "Check the V1 function list before creating tasks."
